@@ -2618,6 +2618,39 @@ class Handler(BaseHTTPRequestHandler):
             "kind": "deploy",
         })
 
+    def _handle_deploy_notify_post(self):
+        try:
+            data = self._read_json_body()
+            number = int(data["number"])
+            repo = str(data["repo"])
+            env = str(data["env"])
+            if "/" not in repo:
+                raise ValueError("repo must be owner/name")
+            if env not in DEPLOY_ENVS:
+                raise ValueError(f"env not in DEPLOY_ENVS: {env}")
+            if not DEPLOY_NOTIFY_CHANNEL_ID:
+                raise ValueError("DEPLOY_NOTIFY_CHANNEL_ID not configured")
+            if not DEPLOY_NOTIFY_USERS:
+                raise ValueError("DEPLOY_NOTIFY_USERS not configured")
+        except Exception as e:
+            self._send_json(400, {"error": f"bad request: {e}"})
+            return
+        deploy_url = DEPLOY_URL_TEMPLATE.format(env=env)
+        job, started = get_or_create_job(repo, number, "deploy_notify")
+        if started:
+            threading.Thread(
+                target=run_deploy_notify,
+                args=(job, env, deploy_url, list(DEPLOY_NOTIFY_USERS)),
+                daemon=True,
+            ).start()
+        self._send_json(202, {
+            "started": started,
+            "running": True,
+            "number": number,
+            "repo": repo,
+            "kind": "deploy_notify",
+        })
+
 
 def main():
     try:
