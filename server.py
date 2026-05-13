@@ -1356,6 +1356,50 @@ INDEX_HTML = r"""<!doctype html>
   }
   .btn-merge:hover:not(:disabled) { background: var(--green-hover); }
   .btn-merge:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
+  .merge-split { position: relative; display: inline-flex; }
+  .merge-split .btn-merge {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .btn-merge-caret {
+    background: var(--green);
+    color: #fff;
+    border: none;
+    border-left: 1px solid rgba(0,0,0,0.25);
+    padding: 6px 8px;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1;
+  }
+  .btn-merge-caret:hover:not(:disabled) { background: var(--green-hover); }
+  .merge-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 200px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: 4px;
+    z-index: 10;
+  }
+  .merge-menu .menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .merge-menu .menu-item:hover { background: #1c2128; }
   .btn-address {
     background: #1f6feb;
     color: #fff;
@@ -1630,7 +1674,14 @@ function renderMyPR(p) {
   const mode = p.nudge_mode || '';
   let actionBtn = '';
   if (p.status === 'approved') {
-    actionBtn = `<button class="btn-merge" type="button">Merge</button>`;
+    actionBtn = `
+      <div class="merge-split">
+        <button class="btn-merge" type="button">Merge</button>
+        <button class="btn-merge-caret" type="button" aria-label="More merge options" aria-haspopup="true" aria-expanded="false">▾</button>
+        <div class="merge-menu" hidden>
+          <button class="menu-item btn-update-branch" type="button">Update with base branch</button>
+        </div>
+      </div>`;
   } else if (p.status === 'has_comments') {
     actionBtn = `<button class="btn-address" type="button">Address</button>`;
   }
