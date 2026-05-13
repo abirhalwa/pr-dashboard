@@ -1303,6 +1303,110 @@ def run_nudge(job, url, title, reviewers, mode):
     print(f"[nudge] finished #{number} result={result['label']}", flush=True)
 
 
+# ---- Deploy-notify dispatch ------------------------------------------------
+
+DEPLOY_NOTIFY_PROMPT = (
+    "Post a deploy notification in Slack.\n"
+    "  Channel ID: {channel}\n"
+    "  Tag these users (resolve each via slack_search_users): {users}\n"
+    "  Env: {env}\n"
+    "  Deploy URL: {deploy_url}\n\n"
+    "Send EXACTLY ONE message via slack_send_message to the channel above. "
+    "Resolve each user first via slack_search_users (try transformations like "
+    "dropping trailing digits or swapping `_` for `.` if the first attempt misses). "
+    "Skip users who don't resolve and note them.\n\n"
+    "The message body must be EXACTLY:\n"
+    "<@USER_ID_1> <@USER_ID_2> ... I've deployed this story to the {env} "
+    "instance, can you please take a look\n"
+    "{deploy_url}\n\n"
+    "Rules:\n"
+    "- Never use slack_send_message_draft — always send for real.\n"
+    "- Never DM users — only post in the channel.\n"
+    "- Send a single message, not one per user.\n"
+    "- Do not summarise in chat."
+)
+
+
+def derive_deploy_notify_result(events):
+    sent = 0
+    for ev in events:
+        if ev.get("type") != "assistant":
+            continue
+        for c in ev.get("message", {}).get("content", []):
+            if c.get("type") != "tool_use":
+                continue
+            name = c.get("name") or ""
+            if "slack_send_message" in name and "draft" not in name:
+                sent += 1
+    if sent == 0:
+        return {"sent": 0, "label": "Channel post failed"}
+    return {"sent": sent, "label": "Posted in channel"}
+
+
+def run_deploy_notify(job, env, deploy_url, users):
+    """Spawn Claude to post the deploy-notify message in the configured channel."""
+    repo = job.repo
+    number = job.number
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = f"{LOG_DIR}/deploy-notify-{repo_flat(repo)}-{number}-{int(time.time())}.log"
+    job.log_path = log_path
+    job.append(
+        f"Posting in Slack (channel {DEPLOY_NOTIFY_CHANNEL_ID}) "
+        f"tagging: {', '.join(users)}"
+    )
+    print(
+        f"[deploy-notify] starting #{number} in {repo} env={env} users={users}",
+        flush=True,
+    )
+
+    prompt = DEPLOY_NOTIFY_PROMPT.format(
+        channel=DEPLOY_NOTIFY_CHANNEL_ID,
+        users=", ".join(users),
+        env=env,
+        deploy_url=deploy_url,
+    )
+    events = []
+    try:
+        proc = subprocess.Popen(
+            ["claude", "-p", prompt,
+             "--permission-mode", "bypassPermissions",
+             "--output-format", "stream-json",
+             "--verbose"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        with open(log_path, "w") as logf:
+            for line in proc.stdout:
+                logf.write(line)
+                logf.flush()
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                events.append(ev)
+                friendly = format_event(ev)
+                if friendly:
+                    job.append(friendly)
+        proc.wait()
+    except Exception as e:
+        job.append(f"Stream error: {e}")
+        job.finish("failed", "stream_error")
+        return
+
+    if proc.returncode != 0:
+        job.append(f"claude exited with code {proc.returncode}")
+        job.finish("failed", f"exit:{proc.returncode}")
+        return
+
+    result = derive_deploy_notify_result(events)
+    job.append(result["label"])
+    job.finish("done", "posted" if result["sent"] else "not_posted")
+    print(f"[deploy-notify] finished #{number} result={result['label']}", flush=True)
+
+
 # ---- HTTP server -----------------------------------------------------------
 
 INDEX_HTML = r"""<!doctype html>
