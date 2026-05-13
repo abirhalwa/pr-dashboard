@@ -849,7 +849,7 @@ def run_update_branch(job):
         msg = str(e)
         job.append(msg)
         # 422 means "already up to date" or "cannot update" — surface, not crash.
-        if "HTTP 422" in msg or "(HTTP 422)" in msg:
+        if "HTTP 422" in msg:
             job.finish("done", "already_up_to_date")
             print(f"[update-branch] finished #{number} already_up_to_date", flush=True)
         else:
