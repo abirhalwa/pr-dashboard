@@ -242,6 +242,8 @@ query($q: String!) {
           viewerDefaultMergeMethod
         }
         reviewDecision
+        mergeable
+        mergeStateStatus
         latestReviews(first: 50) {
           nodes {
             author { login __typename }
