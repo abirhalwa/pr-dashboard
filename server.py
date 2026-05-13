@@ -368,6 +368,19 @@ def gh_json(args):
     return json.loads(out) if out.strip() else None
 
 
+def iso_to_epoch(s, default=0.0):
+    """Parse a GitHub ISO-8601 string (e.g. 2026-05-13T15:42:01Z) to epoch seconds."""
+    try:
+        return datetime.fromisoformat((s or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return default
+
+
+def author_login(obj):
+    """Login of obj.user, or None — tolerates missing user/null author."""
+    return (obj.get("user") or {}).get("login")
+
+
 def get_my_login():
     global _me
     if _me is None:
@@ -422,11 +435,11 @@ def author_reply_count(repo, number, me, author_login, since_iso, fresh):
     my_ids = {
         c["id"]
         for c in comments
-        if (c.get("user") or {}).get("login") == me
+        if author_login(c) == me
     }
     count = 0
     for c in comments:
-        if (c.get("user") or {}).get("login") != author_login:
+        if author_login(c) != author_login_arg:
             continue
         in_reply = c.get("in_reply_to_id")
         if in_reply is None or in_reply not in my_ids:
