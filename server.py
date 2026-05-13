@@ -1378,6 +1378,18 @@ INDEX_HTML = r"""<!doctype html>
   }
   .btn-channel:hover:not(:disabled) { background: #f59e0b; }
   .btn-channel:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
+  .btn-deploy {
+    background: #0891b2;
+    color: #fff;
+    border: none;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .btn-deploy:hover:not(:disabled) { background: #0ea5b9; }
+  .btn-deploy:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
   .review-status.merged { background: rgba(35,134,54,0.15); color: #56d364; border-color: rgba(35,134,54,0.4); }
   .pr-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
   .btn-open {
@@ -1978,6 +1990,7 @@ class Handler(BaseHTTPRequestHandler):
             config_json = json.dumps({
                 "fresh_reviewers": FRESH_REVIEWERS,
                 "team_channel_id": TEAM_CHANNEL_ID,
+                "deploy_envs": DEPLOY_ENVS,
             })
             body = INDEX_HTML.replace(
                 "__PR_DASHBOARD_CONFIG__", config_json,
@@ -2184,6 +2197,33 @@ class Handler(BaseHTTPRequestHandler):
             "number": number,
             "repo": repo,
             "kind": "nudge",
+        })
+
+    def _handle_deploy_post(self):
+        try:
+            data = self._read_json_body()
+            number = int(data["number"])
+            repo = str(data["repo"])
+            head_ref = str(data["headRefName"])
+            env = str(data["env"])
+            if "/" not in repo or not head_ref:
+                raise ValueError("repo must be owner/name and headRefName required")
+            if env not in DEPLOY_ENVS:
+                raise ValueError(f"env not in DEPLOY_ENVS: {env}")
+        except Exception as e:
+            self._send_json(400, {"error": f"bad request: {e}"})
+            return
+        job, started = get_or_create_job(repo, number, "deploy")
+        if started:
+            threading.Thread(
+                target=run_deploy, args=(job, head_ref, env), daemon=True,
+            ).start()
+        self._send_json(202, {
+            "started": started,
+            "running": True,
+            "number": number,
+            "repo": repo,
+            "kind": "deploy",
         })
 
 
