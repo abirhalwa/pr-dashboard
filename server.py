@@ -882,49 +882,36 @@ def run_deploy(job, head_ref, env):
 
     job.append(f"Dispatching {workflow_file} on {head_ref}")
     dispatch_time = time.time()
-    proc = subprocess.run(
-        ["gh", "workflow", "run", workflow_file,
-         "--ref", head_ref, "--repo", repo],
-        capture_output=True, text=True,
-    )
-    for stream in (proc.stdout, proc.stderr):
-        for line in (stream or "").splitlines():
-            if line.strip():
-                job.append(line)
-
-    if proc.returncode != 0:
-        job.append(f"gh exited with code {proc.returncode}")
-        job.finish("failed", f"exit:{proc.returncode}")
+    try:
+        gh_run(["workflow", "run", workflow_file,
+                "--ref", head_ref, "--repo", repo])
+    except RuntimeError as e:
+        job.append(str(e))
+        job.finish("failed", "dispatch_failed")
         print(f"[deploy] finished #{number} dispatch_failed", flush=True)
         return
 
     run_url = ""
-    for _ in range(8):
-        time.sleep(1)
-        lookup = subprocess.run(
-            ["gh", "run", "list", "--workflow", workflow_file,
-             "--branch", head_ref, "--repo", repo,
-             "--limit", "1",
-             "--json", "databaseId,url,status,createdAt"],
-            capture_output=True, text=True,
-        )
-        if lookup.returncode != 0:
-            continue
+    for attempt in range(8):
+        if attempt > 0:
+            time.sleep(1)
         try:
-            runs = json.loads(lookup.stdout) or []
-        except json.JSONDecodeError:
+            runs = gh_json(
+                ["run", "list", "--workflow", workflow_file,
+                 "--branch", head_ref, "--repo", repo,
+                 "--limit", "1",
+                 "--json", "databaseId,url,status,createdAt"]
+            ) or []
+        except RuntimeError:
             continue
         if not runs:
             continue
         latest = runs[0]
-        created_at = latest.get("createdAt") or ""
-        # createdAt is ISO-8601 UTC like "2026-05-13T15:42:01Z".
         try:
-            created_ts = time.mktime(time.strptime(
-                created_at, "%Y-%m-%dT%H:%M:%SZ"))
-            # mktime treats input as local time, so adjust to UTC.
-            created_ts -= time.timezone
-        except (ValueError, TypeError):
+            created_ts = datetime.fromisoformat(
+                (latest.get("createdAt") or "").replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
             created_ts = 0
         if created_ts and created_ts + 5 >= dispatch_time:
             run_url = latest.get("url") or ""
