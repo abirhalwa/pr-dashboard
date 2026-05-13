@@ -1585,6 +1585,9 @@ function render(prs) {
   for (const btn of document.querySelectorAll('.btn-channel')) {
     btn.addEventListener('click', onChannelPing);
   }
+  for (const btn of document.querySelectorAll('.btn-deploy')) {
+    btn.addEventListener('click', onDeploy);
+  }
 }
 
 function renderIncomingPR(p) {
@@ -1849,6 +1852,64 @@ async function onChannelPing(ev) {
   }
   setRunning(card, 'Posting in channel…');
   streamJob(card, 'nudge', repo, number, url, finishNudge);
+}
+
+async function onDeploy(ev) {
+  const btn = ev.currentTarget;
+  const card = btn.closest('.pr');
+  const number = parseInt(card.dataset.number, 10);
+  const repo = card.dataset.repo;
+  const url = card.dataset.url;
+  const headRefName = card.dataset.head;
+  const env = btn.dataset.env;
+
+  if (!env) {
+    toast('No env on this button.', true);
+    return;
+  }
+  if (!confirm(`Deploy ${repo} #${number} (${headRefName}) → ${env}?`)) return;
+
+  try {
+    const res = await fetch('/api/deploy', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ number, repo, headRefName, env }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || ('HTTP ' + res.status));
+    }
+  } catch (e) {
+    toast(`Failed to start: ${e.message}`, true);
+    return;
+  }
+  setRunning(card, `🚀 Deploying to ${env}…`);
+  streamJob(card, 'deploy', repo, number, url, finishDeploy);
+}
+
+function finishDeploy(card, url, data) {
+  const actions = card.querySelector('.pr-actions');
+  let cls = 'failed', label = '❌ Deploy failed';
+  let runUrl = '';
+  if (data.status === 'done') {
+    const result = data.result || '';
+    if (result.startsWith('dispatched:')) {
+      runUrl = result.slice('dispatched:'.length);
+      cls = 'approved'; label = '✅ Dispatched';
+    } else if (result === 'dispatched') {
+      cls = 'approved'; label = '✅ Dispatched';
+    } else if (result === 'no_workflow') {
+      cls = 'failed'; label = '❌ No matching workflow';
+    }
+  }
+  const runLink = runUrl
+    ? `<a class="btn-open" href="${escapeHtml(runUrl)}" target="_blank" rel="noopener">View run ↗</a>`
+    : '';
+  actions.innerHTML = `
+    <span class="review-status ${cls}">${escapeHtml(label)}</span>
+    ${runLink}
+    <a class="btn-open" href="${escapeHtml(url)}" target="_blank" rel="noopener">Open PR ↗</a>
+  `;
 }
 
 function setRunning(card, label) {
