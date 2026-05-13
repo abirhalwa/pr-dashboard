@@ -1594,6 +1594,18 @@ INDEX_HTML = r"""<!doctype html>
   }
   .btn-deploy:hover:not(:disabled) { background: #0ea5b9; }
   .btn-deploy:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
+  .btn-notify {
+    background: #db2777;
+    color: #fff;
+    border: none;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .btn-notify:hover:not(:disabled) { background: #e8429a; }
+  .btn-notify:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
   .review-status.merged { background: rgba(35,134,54,0.15); color: #56d364; border-color: rgba(35,134,54,0.4); }
   .pr-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
   .btn-open {
@@ -1792,6 +1804,9 @@ function render(prs) {
   for (const btn of document.querySelectorAll('.btn-deploy')) {
     btn.addEventListener('click', onDeploy);
   }
+  for (const btn of document.querySelectorAll('.btn-notify')) {
+    btn.addEventListener('click', onNotify);
+  }
   for (const btn of document.querySelectorAll('.btn-merge-caret')) {
     btn.addEventListener('click', onMergeCaret);
   }
@@ -1879,6 +1894,12 @@ function renderMyPR(p) {
   const deployBtns = (CONFIG.deploy_envs || []).map(env =>
     `<button class="btn-deploy" type="button" data-env="${escapeHtml(env)}" title="Run the ${escapeHtml(env)} workflow against ${escapeHtml(p.headRefName)}">🚀 ${escapeHtml(env)}</button>`
   ).join('');
+  const notifyUsers = (CONFIG.deploy_notify_users || []).join(', ');
+  const notifyBtns = CONFIG.deploy_notify_channel_id
+    ? (CONFIG.deploy_envs || []).map(env =>
+        `<button class="btn-notify" type="button" data-env="${escapeHtml(env)}" title="Post in the deploy-notify channel tagging ${escapeHtml(notifyUsers)} about the ${escapeHtml(env)} deploy">📣 ${escapeHtml(env)}</button>`
+      ).join('')
+    : '';
   return `
   <div class="pr"
        data-number="${p.number}"
@@ -1898,6 +1919,7 @@ function renderMyPR(p) {
     <div class="pr-actions">
       <a class="btn-open" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">Open ↗</a>
       ${deployBtns}
+      ${notifyBtns}
       ${channelBtn}
       ${nudgeBtn}
       ${actionBtn}
@@ -2351,6 +2373,8 @@ class Handler(BaseHTTPRequestHandler):
                 "fresh_reviewers": FRESH_REVIEWERS,
                 "team_channel_id": TEAM_CHANNEL_ID,
                 "deploy_envs": DEPLOY_ENVS,
+                "deploy_notify_channel_id": DEPLOY_NOTIFY_CHANNEL_ID,
+                "deploy_notify_users": DEPLOY_NOTIFY_USERS,
             })
             body = INDEX_HTML.replace(
                 "__PR_DASHBOARD_CONFIG__", config_json,
