@@ -65,6 +65,7 @@ Logs persist at `/tmp/pr-tools/logs/`.
 | `AUTHORS`         | Comma-separated GitHub logins surfaced in the "Awaiting my review" tab.        |
 | `FRESH_REVIEWERS` | Comma-separated GitHub logins to nudge when nobody has reviewed your PR yet.   |
 | `TEAM_CHANNEL_ID` | Slack channel ID the "#Channel" button posts in.                               |
+| `DEPLOY_ENVS`     | Comma-separated env names that render as "🚀 \<env\>" buttons in My PRs. Each dispatches the workflow whose filename starts with `<env>` against the PR's head branch. |
 | `HOST`, `PORT`    | Local bind address (default 127.0.0.1:8765).                                   |
 | `CACHE_TTL`       | Seconds the per-PR detail blob is cached for the incoming view (default 30).   |
 
