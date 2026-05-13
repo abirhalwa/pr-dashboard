@@ -1217,10 +1217,8 @@ NUDGE_PROMPT = (
     "exactly. Pick the message template that matches the mode. Do not deviate."
 )
 
-_RE_SLACK_DM = re.compile(r"slack_send_message\b")
-
-
-def derive_nudge_result(events, mode="re_review"):
+def count_slack_sends(events):
+    """Count `slack_send_message` tool calls in a Claude stream (excluding drafts)."""
     sent = 0
     for ev in events:
         if ev.get("type") != "assistant":
@@ -1231,6 +1229,11 @@ def derive_nudge_result(events, mode="re_review"):
             name = c.get("name") or ""
             if "slack_send_message" in name and "draft" not in name:
                 sent += 1
+    return sent
+
+
+def derive_nudge_result(events, mode="re_review"):
+    sent = count_slack_sends(events)
     if sent == 0:
         return {
             "sent": 0,
@@ -1328,16 +1331,7 @@ DEPLOY_NOTIFY_PROMPT = (
 
 
 def derive_deploy_notify_result(events):
-    sent = 0
-    for ev in events:
-        if ev.get("type") != "assistant":
-            continue
-        for c in ev.get("message", {}).get("content", []):
-            if c.get("type") != "tool_use":
-                continue
-            name = c.get("name") or ""
-            if "slack_send_message" in name and "draft" not in name:
-                sent += 1
+    sent = count_slack_sends(events)
     if sent == 0:
         return {"sent": 0, "label": "Channel post failed"}
     return {"sent": sent, "label": "Posted in channel"}
