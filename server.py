@@ -2184,6 +2184,53 @@ function finishDeploy(card, url, data) {
   `;
 }
 
+async function onNotify(ev) {
+  const btn = ev.currentTarget;
+  const card = btn.closest('.pr');
+  const number = parseInt(card.dataset.number, 10);
+  const repo = card.dataset.repo;
+  const url = card.dataset.url;
+  const env = btn.dataset.env;
+  const users = (CONFIG.deploy_notify_users || []).join(', ');
+
+  if (!env) {
+    toast('No env on this button.', true);
+    return;
+  }
+  if (!confirm(`Post a deploy notification tagging ${users} about ${env}?`)) return;
+
+  try {
+    const res = await fetch('/api/deploy-notify', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ number, repo, env }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || ('HTTP ' + res.status));
+    }
+  } catch (e) {
+    toast(`Failed to start: ${e.message}`, true);
+    return;
+  }
+  setRunning(card, `Posting deploy notice for ${env}…`);
+  streamJob(card, 'deploy_notify', repo, number, url, finishDeployNotify);
+}
+
+function finishDeployNotify(card, url, data) {
+  const actions = card.querySelector('.pr-actions');
+  let cls = 'failed', label = '❌ Post failed';
+  if (data.status === 'done' && data.result === 'posted') {
+    cls = 'approved'; label = '✅ Posted in channel';
+  } else if (data.status === 'done') {
+    cls = 'commented'; label = 'ℹ No message sent';
+  }
+  actions.innerHTML = `
+    <span class="review-status ${cls}">${escapeHtml(label)}</span>
+    <a class="btn-open" href="${escapeHtml(url)}" target="_blank" rel="noopener">Open PR ↗</a>
+  `;
+}
+
 async function onUpdateBranch(ev) {
   ev.stopPropagation();
   closeAllMergeMenus();

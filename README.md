@@ -66,6 +66,9 @@ Logs persist at `/tmp/pr-tools/logs/`.
 | `FRESH_REVIEWERS` | Comma-separated GitHub logins to nudge when nobody has reviewed your PR yet.   |
 | `TEAM_CHANNEL_ID` | Slack channel ID the "#Channel" button posts in.                               |
 | `DEPLOY_ENVS`     | Comma-separated env names that render as "🚀 \<env\>" buttons in My PRs. Each dispatches the workflow whose filename starts with `<env>` against the PR's head branch. |
+| `DEPLOY_NOTIFY_CHANNEL_ID` | Slack channel ID where the "📣 \<env\>" deploy-notify button posts. Leave blank to hide the buttons. |
+| `DEPLOY_NOTIFY_USERS` | Comma-separated Slack handles tagged in the deploy-notify post (resolved via `slack_search_users`). |
+| `DEPLOY_URL_TEMPLATE` | URL template for the deployed env. `{env}` is replaced with the env name. Default: `https://{env}.dev.cognota.com`. |
 | `HOST`, `PORT`    | Local bind address (default 127.0.0.1:8765).                                   |
 | `CACHE_TTL`       | Seconds the per-PR detail blob is cached for the incoming view (default 30).   |
 
