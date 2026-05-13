@@ -1646,6 +1646,40 @@ function render(prs) {
   for (const btn of document.querySelectorAll('.btn-deploy')) {
     btn.addEventListener('click', onDeploy);
   }
+  for (const btn of document.querySelectorAll('.btn-merge-caret')) {
+    btn.addEventListener('click', onMergeCaret);
+  }
+  for (const btn of document.querySelectorAll('.btn-update-branch')) {
+    btn.addEventListener('click', onUpdateBranch);
+  }
+}
+
+function closeAllMergeMenus() {
+  for (const menu of document.querySelectorAll('.merge-menu')) {
+    menu.hidden = true;
+  }
+  for (const caret of document.querySelectorAll('.btn-merge-caret')) {
+    caret.setAttribute('aria-expanded', 'false');
+  }
+}
+
+document.addEventListener('click', (ev) => {
+  if (!ev.target.closest('.merge-split')) closeAllMergeMenus();
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') closeAllMergeMenus();
+});
+
+function onMergeCaret(ev) {
+  ev.stopPropagation();
+  const caret = ev.currentTarget;
+  const menu = caret.parentElement.querySelector('.merge-menu');
+  const willOpen = menu.hidden;
+  closeAllMergeMenus();
+  if (willOpen) {
+    menu.hidden = false;
+    caret.setAttribute('aria-expanded', 'true');
+  }
 }
 
 function renderIncomingPR(p) {
