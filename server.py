@@ -689,41 +689,46 @@ def format_event(ev):
 
 _RE_APPROVE = re.compile(r"gh\s+pr\s+review\b[^|;&]*--approve")
 _RE_REVIEW_API = re.compile(r"gh\s+api\s+repos/[^\s]+/pulls/\d+/reviews\b")
-_RE_COMMENTS_API = re.compile(r"gh\s+api\s+repos/[^\s]+/pulls/\d+/comments\b")
 
 
-def count_pending_comments(repo, number, me):
-    """Sum comments across all of my pending reviews on this PR."""
+_REVIEW_STATE_TO_RESULT = {
+    "APPROVED": "approved",
+    "CHANGES_REQUESTED": "changes_requested",
+    "COMMENTED": "commented",
+}
+
+
+def latest_my_review_state(repo, number, me, since_ts):
+    """State of `me`'s most recent submitted review on this PR since `since_ts`.
+
+    Returns "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING",
+    or None when no qualifying review exists.
+    """
     try:
         reviews = gh_json([
             "api", f"repos/{repo}/pulls/{number}/reviews", "--paginate",
         ]) or []
     except Exception:
-        return 0
-    total = 0
+        return None
+    best = None
     for r in reviews:
-        if r.get("state") != "PENDING":
-            continue
         if (r.get("user") or {}).get("login") != me:
             continue
-        rid = r.get("id")
+        sub = r.get("submitted_at") or ""
         try:
-            comments = gh_json([
-                "api",
-                f"repos/{repo}/pulls/{number}/reviews/{rid}/comments",
-                "--paginate",
-            ]) or []
-        except Exception:
+            ts = datetime.fromisoformat(sub.replace("Z", "+00:00")).timestamp()
+        except ValueError:
             continue
-        total += len(comments)
-    return total
+        # 5s grace covers clock skew between the agent host and GitHub.
+        if ts >= since_ts - 5 and (best is None or ts > best[0]):
+            best = (ts, r.get("state"))
+    return best[1] if best else None
 
 
-def derive_result(events, repo, number, me):
-    """Look at the tool_use stream + GH state to figure out what claude actually did."""
+def derive_result(events, repo, number, me, start_time):
+    """Detect what claude did: approved / changes_requested / commented / no_action."""
     approves = 0
     review_calls = 0
-    comment_calls = 0
     for ev in events:
         if ev.get("type") != "assistant":
             continue
@@ -735,17 +740,12 @@ def derive_result(events, repo, number, me):
                 approves += 1
             if _RE_REVIEW_API.search(cmd):
                 review_calls += 1
-            if _RE_COMMENTS_API.search(cmd):
-                comment_calls += 1
     if approves > 0:
         return "approved"
-    if review_calls > 0 or comment_calls > 0:
-        n = count_pending_comments(repo, number, me)
-        if n <= 0:
-            # fallback: at least one comment per API call observed
-            n = max(review_calls, comment_calls)
-        return f"commented:{n}"
-    return "no_action"
+    if review_calls == 0 or not me:
+        return "no_action"
+    state = latest_my_review_state(repo, number, me, start_time)
+    return _REVIEW_STATE_TO_RESULT.get(state or "", "no_action")
 
 
 def run_review(job):
@@ -809,15 +809,14 @@ def run_review(job):
         me = get_my_login()
     except Exception:
         me = None
-    result = derive_result(events, repo, number, me)
+    result = derive_result(events, repo, number, me, job.start_time)
     label = {
         "approved": "Approved PR ✓",
+        "changes_requested": "Requested changes ✓",
+        "commented": "Left a comment-only review",
         "no_action": "Finished (no GitHub action taken)",
-    }.get(result)
-    if label is None and result.startswith("commented:"):
-        n = result.split(":", 1)[1]
-        label = f"Posted {n} pending comment(s)"
-    job.append(label or f"Finished: {result}")
+    }.get(result, f"Finished: {result}")
+    job.append(label)
     job.finish("done", result)
     print(f"[review] finished #{number} result={result}", flush=True)
 
