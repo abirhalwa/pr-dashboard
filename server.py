@@ -100,6 +100,13 @@ TEAM_CHANNEL_ID = os.environ.get("TEAM_CHANNEL_ID", "")
 # and dispatches it against the PR's head branch via `gh workflow run`.
 DEPLOY_ENVS = _env_list("DEPLOY_ENVS")
 
+# Slack channel for the "📣 <env>" deploy-notify button. Blank → buttons hidden.
+DEPLOY_NOTIFY_CHANNEL_ID = os.environ.get("DEPLOY_NOTIFY_CHANNEL_ID", "")
+DEPLOY_NOTIFY_USERS = _env_list("DEPLOY_NOTIFY_USERS")
+DEPLOY_URL_TEMPLATE = os.environ.get(
+    "DEPLOY_URL_TEMPLATE", "https://{env}.dev.cognota.com"
+)
+
 
 def _is_human_author(author):
     """True if the GraphQL author node is a real user (not a Bot, etc)."""
