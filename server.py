@@ -830,6 +830,118 @@ def run_merge(job, default_method):
         print(f"[merge] finished #{job.number} failed", flush=True)
 
 
+# ---- Deploy dispatch -------------------------------------------------------
+
+_workflow_cache = {}  # (repo, env) -> workflow file basename, e.g. "csi-2-deploy.yaml"
+_workflow_cache_lock = threading.Lock()
+
+
+def resolve_deploy_workflow(repo, env):
+    """Find the workflow file in `repo` whose basename starts with `env`.
+
+    Cached per (repo, env). Restart the server if a workflow is renamed.
+    Returns the basename (e.g. "csi-2.yml") or None if no match.
+    """
+    key = (repo, env)
+    with _workflow_cache_lock:
+        if key in _workflow_cache:
+            return _workflow_cache[key]
+    proc = subprocess.run(
+        ["gh", "workflow", "list", "--repo", repo, "--all",
+         "--json", "name,path,state"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        workflows = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    env_lower = env.lower()
+    for wf in workflows:
+        path = wf.get("path") or ""
+        basename = os.path.basename(path)
+        stem = basename.rsplit(".", 1)[0].lower()
+        if stem == env_lower or stem.startswith(env_lower + "-"):
+            with _workflow_cache_lock:
+                _workflow_cache[key] = basename
+            return basename
+    return None
+
+
+def run_deploy(job, head_ref, env):
+    """Dispatch the workflow for `env` against the PR's head branch."""
+    repo = job.repo
+    number = job.number
+    job.append(f"Resolving {env} workflow in {repo}")
+    print(f"[deploy] starting #{number} in {repo} env={env}", flush=True)
+
+    workflow_file = resolve_deploy_workflow(repo, env)
+    if not workflow_file:
+        job.append(f"No workflow file matching '{env}' found in {repo}")
+        job.finish("failed", "no_workflow")
+        print(f"[deploy] finished #{number} no_workflow", flush=True)
+        return
+
+    job.append(f"Dispatching {workflow_file} on {head_ref}")
+    dispatch_time = time.time()
+    proc = subprocess.run(
+        ["gh", "workflow", "run", workflow_file,
+         "--ref", head_ref, "--repo", repo],
+        capture_output=True, text=True,
+    )
+    for stream in (proc.stdout, proc.stderr):
+        for line in (stream or "").splitlines():
+            if line.strip():
+                job.append(line)
+
+    if proc.returncode != 0:
+        job.append(f"gh exited with code {proc.returncode}")
+        job.finish("failed", f"exit:{proc.returncode}")
+        print(f"[deploy] finished #{number} dispatch_failed", flush=True)
+        return
+
+    run_url = ""
+    for _ in range(8):
+        time.sleep(1)
+        lookup = subprocess.run(
+            ["gh", "run", "list", "--workflow", workflow_file,
+             "--branch", head_ref, "--repo", repo,
+             "--limit", "1",
+             "--json", "databaseId,url,status,createdAt"],
+            capture_output=True, text=True,
+        )
+        if lookup.returncode != 0:
+            continue
+        try:
+            runs = json.loads(lookup.stdout) or []
+        except json.JSONDecodeError:
+            continue
+        if not runs:
+            continue
+        latest = runs[0]
+        created_at = latest.get("createdAt") or ""
+        # createdAt is ISO-8601 UTC like "2026-05-13T15:42:01Z".
+        try:
+            created_ts = time.mktime(time.strptime(
+                created_at, "%Y-%m-%dT%H:%M:%SZ"))
+            # mktime treats input as local time, so adjust to UTC.
+            created_ts -= time.timezone
+        except (ValueError, TypeError):
+            created_ts = 0
+        if created_ts and created_ts + 5 >= dispatch_time:
+            run_url = latest.get("url") or ""
+            break
+
+    if run_url:
+        job.append(f"Run started: {run_url}")
+        job.finish("done", f"dispatched:{run_url}")
+    else:
+        job.append("Run dispatched (no run URL yet)")
+        job.finish("done", "dispatched")
+    print(f"[deploy] finished #{number} dispatched", flush=True)
+
+
 # ---- Agent-clone management ------------------------------------------------
 
 AGENT_CLONES_DIR = os.path.expanduser("~/.cache/pr-tools/clones")
@@ -1903,7 +2015,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400, "bad number")
                 return
             kind = qs.get("kind", ["review"])[0]
-            if kind not in ("review", "merge", "address", "nudge"):
+            if kind not in ("review", "merge", "address", "nudge", "deploy"):
                 self.send_error(400, "bad kind")
                 return
             if "/" not in repo or number <= 0:
@@ -1960,6 +2072,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/nudge":
             self._handle_nudge_post()
+            return
+        if parsed.path == "/api/deploy":
+            self._handle_deploy_post()
             return
         self.send_error(404)
 
