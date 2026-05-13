@@ -831,6 +831,36 @@ def run_merge(job, default_method):
         print(f"[merge] finished #{job.number} failed", flush=True)
 
 
+# ---- Update-branch dispatch ------------------------------------------------
+
+def run_update_branch(job):
+    """Tell GitHub to merge the PR's base branch into its head branch.
+
+    Equivalent to clicking "Update branch" on the GitHub PR page.
+    """
+    repo = job.repo
+    number = job.number
+    job.append(f"Updating #{number} in {repo} with base branch")
+    print(f"[update-branch] starting #{number} in {repo}", flush=True)
+    try:
+        gh_run(["api", "-X", "PUT",
+                f"repos/{repo}/pulls/{number}/update-branch"])
+    except RuntimeError as e:
+        msg = str(e)
+        job.append(msg)
+        # 422 means "already up to date" or "cannot update" — surface, not crash.
+        if "HTTP 422" in msg or "(HTTP 422)" in msg:
+            job.finish("done", "already_up_to_date")
+            print(f"[update-branch] finished #{number} already_up_to_date", flush=True)
+        else:
+            job.finish("failed", "update_failed")
+            print(f"[update-branch] finished #{number} failed", flush=True)
+        return
+    job.append("Update queued ✓")
+    job.finish("done", "updated")
+    print(f"[update-branch] finished #{number} updated", flush=True)
+
+
 # ---- Deploy dispatch -------------------------------------------------------
 
 _workflow_cache = {}  # (repo, env) -> workflow file basename, e.g. "csi-2-deploy.yaml"
@@ -2077,7 +2107,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400, "bad number")
                 return
             kind = qs.get("kind", ["review"])[0]
-            if kind not in ("review", "merge", "address", "nudge", "deploy"):
+            if kind not in ("review", "merge", "address", "nudge", "deploy", "update_branch"):
                 self.send_error(400, "bad kind")
                 return
             if "/" not in repo or number <= 0:
@@ -2137,6 +2167,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/deploy":
             self._handle_deploy_post()
+            return
+        if parsed.path == "/api/update-branch":
+            self._handle_update_branch_post()
             return
         self.send_error(404)
 
@@ -2246,6 +2279,29 @@ class Handler(BaseHTTPRequestHandler):
             "number": number,
             "repo": repo,
             "kind": "nudge",
+        })
+
+    def _handle_update_branch_post(self):
+        try:
+            data = self._read_json_body()
+            number = int(data["number"])
+            repo = str(data["repo"])
+            if "/" not in repo:
+                raise ValueError("repo must be owner/name")
+        except Exception as e:
+            self._send_json(400, {"error": f"bad request: {e}"})
+            return
+        job, started = get_or_create_job(repo, number, "update_branch")
+        if started:
+            threading.Thread(
+                target=run_update_branch, args=(job,), daemon=True,
+            ).start()
+        self._send_json(202, {
+            "started": started,
+            "running": True,
+            "number": number,
+            "repo": repo,
+            "kind": "update_branch",
         })
 
     def _handle_deploy_post(self):
