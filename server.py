@@ -225,6 +225,33 @@ def determine_my_pr_status(pr, me):
     }
 
 
+_MERGE_STATE_REASONS = {
+    "BEHIND":    (True,  "Branch is out-of-date — use 'Update with base branch' first"),
+    "DIRTY":     (True,  "Has merge conflicts with the base branch"),
+    "BLOCKED":   (True,  "Required checks failing or a required review is missing"),
+    "DRAFT":     (True,  "PR is still a draft"),
+    "UNSTABLE":  (False, "Non-required checks are failing"),
+    "CLEAN":     (False, ""),
+    "HAS_HOOKS": (False, ""),
+    "UNKNOWN":   (False, ""),
+}
+
+
+def derive_merge_block(pr):
+    """Map GitHub's mergeable + mergeStateStatus into a UI hint.
+
+    Conflicting trumps everything — even if mergeStateStatus hasn't caught up.
+    """
+    if (pr.get("mergeable") or "").upper() == "CONFLICTING":
+        return {
+            "merge_blocked": True,
+            "merge_block_reason": "Has merge conflicts with the base branch",
+        }
+    state = (pr.get("mergeStateStatus") or "").upper()
+    blocked, reason = _MERGE_STATE_REASONS.get(state, (False, ""))
+    return {"merge_blocked": blocked, "merge_block_reason": reason}
+
+
 MY_PRS_GRAPHQL = """
 query($q: String!) {
   search(query: $q, type: ISSUE, first: 50) {
@@ -306,6 +333,7 @@ def list_my_prs():
                 (pr.get("repository") or {}).get("viewerDefaultMergeMethod")
                 or "MERGE"
             ),
+            **derive_merge_block(pr),
             **status,
         })
 
