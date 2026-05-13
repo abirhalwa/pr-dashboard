@@ -844,29 +844,25 @@ def resolve_deploy_workflow(repo, env):
     Returns the basename (e.g. "csi-2.yml") or None if no match.
     """
     key = (repo, env)
+    # Hold the lock across the gh call so two concurrent clicks on the same
+    # (repo, env) don't both spawn `gh workflow list` on a cold cache.
     with _workflow_cache_lock:
         if key in _workflow_cache:
             return _workflow_cache[key]
-    proc = subprocess.run(
-        ["gh", "workflow", "list", "--repo", repo, "--all",
-         "--json", "name,path,state"],
-        capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        return None
-    try:
-        workflows = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return None
-    env_lower = env.lower()
-    for wf in workflows:
-        path = wf.get("path") or ""
-        basename = os.path.basename(path)
-        stem = basename.rsplit(".", 1)[0].lower()
-        if stem == env_lower or stem.startswith(env_lower + "-"):
-            with _workflow_cache_lock:
+        try:
+            workflows = gh_json(
+                ["workflow", "list", "--repo", repo, "--all",
+                 "--json", "name,path,state"]
+            ) or []
+        except RuntimeError:
+            return None
+        env_lower = env.lower()
+        for wf in workflows:
+            basename = os.path.basename(wf.get("path") or "")
+            stem = basename.rsplit(".", 1)[0].lower()
+            if stem == env_lower or stem.startswith(env_lower + "-"):
                 _workflow_cache[key] = basename
-            return basename
+                return basename
     return None
 
 
