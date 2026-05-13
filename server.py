@@ -245,7 +245,7 @@ def derive_merge_block(pr):
     if (pr.get("mergeable") or "").upper() == "CONFLICTING":
         return {
             "merge_blocked": True,
-            "merge_block_reason": "Has merge conflicts with the base branch",
+            "merge_block_reason": _MERGE_STATE_REASONS["DIRTY"][1],
         }
     state = (pr.get("mergeStateStatus") or "").upper()
     blocked, reason = _MERGE_STATE_REASONS.get(state, (False, ""))
@@ -1745,7 +1745,7 @@ function renderMyPR(p) {
     actionBtn = `
       <div class="merge-split">
         <button class="btn-merge" type="button"${mergeAttrs}>Merge</button>
-        <button class="btn-merge-caret" type="button" aria-label="More merge options" aria-haspopup="true" aria-expanded="false"${titleAttr}>▾</button>
+        <button class="btn-merge-caret" type="button" aria-label="More merge options" aria-haspopup="true" aria-expanded="false">▾</button>
         <div class="merge-menu" hidden>
           <button class="menu-item btn-update-branch" type="button">Update with base branch</button>
         </div>
