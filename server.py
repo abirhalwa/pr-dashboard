@@ -1867,7 +1867,7 @@ async function onDeploy(ev) {
     toast(`Failed to start: ${e.message}`, true);
     return;
   }
-  setRunning(card, `🚀 Deploying to ${env}…`);
+  setRunning(card, `Deploying to ${env}…`);
   streamJob(card, 'deploy', repo, number, url, finishDeploy);
 }
 
@@ -2257,6 +2257,9 @@ class Handler(BaseHTTPRequestHandler):
             env = str(data["env"])
             if "/" not in repo or not head_ref:
                 raise ValueError("repo must be owner/name and headRefName required")
+            if not re.fullmatch(r"[A-Za-z0-9._/-]+", head_ref) or \
+                    head_ref.startswith("-") or ".." in head_ref:
+                raise ValueError(f"bad headRefName: {head_ref}")
             if env not in DEPLOY_ENVS:
                 raise ValueError(f"env not in DEPLOY_ENVS: {env}")
         except Exception as e:
