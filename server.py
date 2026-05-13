@@ -427,9 +427,9 @@ def fetch_review_comments(repo, number, fresh=False):
     return comments
 
 
-def author_reply_count(repo, number, me, author_login, since_iso, fresh):
+def author_reply_count(repo, number, me, pr_author, since_iso, fresh):
     """Replies from the PR author to my review comments since my last review."""
-    if not author_login or not since_iso:
+    if not pr_author or not since_iso:
         return 0
     comments = fetch_review_comments(repo, number, fresh=fresh)
     my_ids = {
@@ -439,7 +439,7 @@ def author_reply_count(repo, number, me, author_login, since_iso, fresh):
     }
     count = 0
     for c in comments:
-        if author_login(c) != author_login_arg:
+        if author_login(c) != pr_author:
             continue
         in_reply = c.get("in_reply_to_id")
         if in_reply is None or in_reply not in my_ids:
