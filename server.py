@@ -2011,6 +2011,51 @@ function finishDeploy(card, url, data) {
   `;
 }
 
+async function onUpdateBranch(ev) {
+  ev.stopPropagation();
+  closeAllMergeMenus();
+  const btn = ev.currentTarget;
+  const card = btn.closest('.pr');
+  const number = parseInt(card.dataset.number, 10);
+  const repo = card.dataset.repo;
+  const url = card.dataset.url;
+
+  if (!confirm(`Update ${repo} #${number} with base branch?`)) return;
+
+  try {
+    const res = await fetch('/api/update-branch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ number, repo }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || ('HTTP ' + res.status));
+    }
+  } catch (e) {
+    toast(`Failed to start: ${e.message}`, true);
+    return;
+  }
+  setRunning(card, 'Updating branch…');
+  streamJob(card, 'update_branch', repo, number, url, finishUpdateBranch);
+}
+
+function finishUpdateBranch(card, url, data) {
+  const actions = card.querySelector('.pr-actions');
+  let cls = 'failed', label = '❌ Update failed';
+  if (data.status === 'done') {
+    if (data.result === 'updated') {
+      cls = 'approved'; label = '✅ Updated';
+    } else if (data.result === 'already_up_to_date') {
+      cls = 'commented'; label = 'ℹ Already up to date';
+    }
+  }
+  actions.innerHTML = `
+    <span class="review-status ${cls}">${escapeHtml(label)}</span>
+    <a class="btn-open" href="${escapeHtml(url)}" target="_blank" rel="noopener">Open PR ↗</a>
+  `;
+}
+
 function setRunning(card, label) {
   const main = card.querySelector('.pr-main');
   const actions = card.querySelector('.pr-actions');
