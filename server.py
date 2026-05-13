@@ -1624,6 +1624,9 @@ function renderMyPR(p) {
         : 'No one to nudge');
   const nudgeBtn = `<button class="btn-nudge" type="button" title="${escapeHtml(nudgeTitle)}">Nudge</button>`;
   const channelBtn = `<button class="btn-channel" type="button" title="Post in team channel tagging Steve and Pratik">#Channel</button>`;
+  const deployBtns = (CONFIG.deploy_envs || []).map(env =>
+    `<button class="btn-deploy" type="button" data-env="${escapeHtml(env)}" title="Run the ${escapeHtml(env)} workflow against ${escapeHtml(p.headRefName)}">🚀 ${escapeHtml(env)}</button>`
+  ).join('');
   return `
   <div class="pr"
        data-number="${p.number}"
@@ -1642,6 +1645,7 @@ function renderMyPR(p) {
     </div>
     <div class="pr-actions">
       <a class="btn-open" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">Open ↗</a>
+      ${deployBtns}
       ${channelBtn}
       ${nudgeBtn}
       ${actionBtn}
