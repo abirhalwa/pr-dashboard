@@ -2388,7 +2388,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400, "bad number")
                 return
             kind = qs.get("kind", ["review"])[0]
-            if kind not in ("review", "merge", "address", "nudge", "deploy", "update_branch"):
+            if kind not in ("review", "merge", "address", "nudge", "deploy", "update_branch", "deploy_notify"):
                 self.send_error(400, "bad kind")
                 return
             if "/" not in repo or number <= 0:
@@ -2451,6 +2451,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/update-branch":
             self._handle_update_branch_post()
+            return
+        if parsed.path == "/api/deploy-notify":
+            self._handle_deploy_notify_post()
             return
         self.send_error(404)
 
