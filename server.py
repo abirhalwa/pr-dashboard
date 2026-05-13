@@ -714,8 +714,8 @@ _REVIEW_STATE_TO_RESULT = {
 def latest_my_review_state(repo, number, me, since_ts):
     """State of `me`'s most recent submitted review on this PR since `since_ts`.
 
-    Returns "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", "PENDING",
-    or None when no qualifying review exists.
+    Returns "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED", or None.
+    Pending reviews carry no submitted_at and are skipped.
     """
     try:
         reviews = gh_json([
@@ -725,12 +725,10 @@ def latest_my_review_state(repo, number, me, since_ts):
         return None
     best = None
     for r in reviews:
-        if (r.get("user") or {}).get("login") != me:
+        if author_login(r) != me:
             continue
-        sub = r.get("submitted_at") or ""
-        try:
-            ts = datetime.fromisoformat(sub.replace("Z", "+00:00")).timestamp()
-        except ValueError:
+        ts = iso_to_epoch(r.get("submitted_at"))
+        if not ts:
             continue
         # 5s grace covers clock skew between the agent host and GitHub.
         if ts >= since_ts - 5 and (best is None or ts > best[0]):
@@ -979,12 +977,7 @@ def run_deploy(job, head_ref, env):
         if not runs:
             continue
         latest = runs[0]
-        try:
-            created_ts = datetime.fromisoformat(
-                (latest.get("createdAt") or "").replace("Z", "+00:00")
-            ).timestamp()
-        except ValueError:
-            created_ts = 0
+        created_ts = iso_to_epoch(latest.get("createdAt"))
         if created_ts and created_ts + 5 >= dispatch_time:
             run_url = latest.get("url") or ""
             break
