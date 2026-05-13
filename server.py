@@ -1738,10 +1738,14 @@ function renderMyPR(p) {
   const mode = p.nudge_mode || '';
   let actionBtn = '';
   if (p.status === 'approved') {
+    const blocked = !!p.merge_blocked;
+    const reason = p.merge_block_reason || '';
+    const titleAttr = reason ? ` title="${escapeHtml(reason)}"` : '';
+    const mergeAttrs = (blocked ? ' disabled aria-disabled="true"' : '') + titleAttr;
     actionBtn = `
       <div class="merge-split">
-        <button class="btn-merge" type="button">Merge</button>
-        <button class="btn-merge-caret" type="button" aria-label="More merge options" aria-haspopup="true" aria-expanded="false">▾</button>
+        <button class="btn-merge" type="button"${mergeAttrs}>Merge</button>
+        <button class="btn-merge-caret" type="button" aria-label="More merge options" aria-haspopup="true" aria-expanded="false"${titleAttr}>▾</button>
         <div class="merge-menu" hidden>
           <button class="menu-item btn-update-branch" type="button">Update with base branch</button>
         </div>
@@ -1810,6 +1814,7 @@ async function onReview(ev) {
 
 async function onMerge(ev) {
   const btn = ev.currentTarget;
+  if (btn.disabled) return;
   const card = btn.closest('.pr');
   const number = parseInt(card.dataset.number, 10);
   const repo = card.dataset.repo;
