@@ -94,6 +94,11 @@ FRESH_REVIEWERS = _env_list("FRESH_REVIEWERS")
 # Team Slack channel for broadcast-style review requests.
 TEAM_CHANNEL_ID = os.environ.get("TEAM_CHANNEL_ID", "")
 
+# GitHub Actions environments the Deploy button can target.
+# For each name, the dashboard looks up a workflow whose filename starts with the env
+# and dispatches it against the PR's head branch via `gh workflow run`.
+DEPLOY_ENVS = _env_list("DEPLOY_ENVS")
+
 
 def _is_human_author(author):
     """True if the GraphQL author node is a real user (not a Bot, etc)."""
