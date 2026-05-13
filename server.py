@@ -2146,12 +2146,12 @@ function finishReview(card, url, data) {
   if (data.status === 'done') {
     if (data.result === 'approved') {
       cls = 'approved'; label = '✅ Approved';
-    } else if ((data.result || '').startsWith('commented:')) {
-      const n = data.result.split(':')[1];
-      cls = 'commented';
-      label = `💬 ${n} pending comment${n === '1' ? '' : 's'} left`;
+    } else if (data.result === 'changes_requested') {
+      cls = 'commented'; label = '🔴 Changes requested';
+    } else if (data.result === 'commented') {
+      cls = 'commented'; label = '💬 Comment-only review';
     } else {
-      cls = 'commented'; label = 'ℹ Done';
+      cls = 'commented'; label = 'ℹ No action';
     }
   }
   actions.innerHTML = `
