@@ -100,8 +100,9 @@ TEAM_CHANNEL_ID = os.environ.get("TEAM_CHANNEL_ID", "")
 # and dispatches it against the PR's head branch via `gh workflow run`.
 DEPLOY_ENVS = _env_list("DEPLOY_ENVS")
 
-# Slack channel for the "📣 <env>" deploy-notify button. Blank → buttons hidden.
+# Slack channel for the "📣 …" deploy-notify button. Blank → buttons hidden.
 DEPLOY_NOTIFY_CHANNEL_ID = os.environ.get("DEPLOY_NOTIFY_CHANNEL_ID", "")
+DEPLOY_NOTIFY_CHANNEL_NAME = os.environ.get("DEPLOY_NOTIFY_CHANNEL_NAME", "")
 DEPLOY_NOTIFY_USERS = _env_list("DEPLOY_NOTIFY_USERS")
 DEPLOY_URL_TEMPLATE = os.environ.get(
     "DEPLOY_URL_TEMPLATE", "https://{env}.dev.cognota.com"
@@ -2417,6 +2418,7 @@ class Handler(BaseHTTPRequestHandler):
                 "team_channel_id": TEAM_CHANNEL_ID,
                 "deploy_envs": DEPLOY_ENVS,
                 "deploy_notify_channel_id": DEPLOY_NOTIFY_CHANNEL_ID,
+                "deploy_notify_channel_name": DEPLOY_NOTIFY_CHANNEL_NAME,
                 "deploy_notify_users": DEPLOY_NOTIFY_USERS,
             })
             body = INDEX_HTML.replace(
