@@ -1892,10 +1892,12 @@ function renderMyPR(p) {
     `<button class="btn-deploy" type="button" data-env="${escapeHtml(env)}" title="Run the ${escapeHtml(env)} workflow against ${escapeHtml(p.headRefName)}">🚀 ${escapeHtml(env)}</button>`
   ).join('');
   const notifyUsers = (CONFIG.deploy_notify_users || []).join(', ');
+  const notifyChannelLabel = CONFIG.deploy_notify_channel_name || '';
   const notifyBtns = CONFIG.deploy_notify_channel_id
-    ? (CONFIG.deploy_envs || []).map(env =>
-        `<button class="btn-notify" type="button" data-env="${escapeHtml(env)}" title="Post in the deploy-notify channel tagging ${escapeHtml(notifyUsers)} about the ${escapeHtml(env)} deploy">📣 ${escapeHtml(env)}</button>`
-      ).join('')
+    ? (CONFIG.deploy_envs || []).map(env => {
+        const label = notifyChannelLabel || env;
+        return `<button class="btn-notify" type="button" data-env="${escapeHtml(env)}" title="Post in ${escapeHtml(notifyChannelLabel || 'the deploy-notify channel')} tagging ${escapeHtml(notifyUsers)} about the ${escapeHtml(env)} deploy">📣 ${escapeHtml(label)}</button>`;
+      }).join('')
     : '';
   return `
   <div class="pr"
