@@ -267,7 +267,7 @@ class DetermineMyPrStatus(unittest.TestCase):
                commits=[commit_node("2026-05-02T09:00:00Z")]),
             self.me,
         )
-        self.assertEqual(out["status"], "not_reviewed_yet")
+        self.assertEqual(out["status"], "comments_addressed")
         self.assertEqual(out["active_commenters"], [])
 
     def test_thread_still_flagged_when_reply_but_no_commit(self):
@@ -304,7 +304,7 @@ class DetermineMyPrStatus(unittest.TestCase):
                commits=[commit_node("2026-05-02T10:00:00Z")]),
             self.me,
         )
-        self.assertEqual(out["status"], "not_reviewed_yet")
+        self.assertEqual(out["status"], "comments_addressed")
         self.assertEqual(out["active_commenters"], [])
 
     def test_general_comment_still_flagged_when_commit_predates(self):
