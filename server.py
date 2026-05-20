@@ -97,6 +97,46 @@ FRESH_REVIEWERS = _env_list("FRESH_REVIEWERS")
 # Team Slack channel for broadcast-style review requests.
 TEAM_CHANNEL_ID = os.environ.get("TEAM_CHANNEL_ID", "")
 
+# Extra named teams selectable from the Channel / Nudge dropdowns.
+# Format: JSON array of {name, channel_id, reviewers: [...]} objects.
+def _parse_teams():
+    raw = os.environ.get("TEAMS", "").strip()
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+        if not isinstance(items, list):
+            raise ValueError("TEAMS must be a JSON array")
+        return [
+            {
+                "name": str(i["name"]),
+                "channel_id": str(i["channel_id"]),
+                "reviewers": [str(r) for r in i.get("reviewers", [])],
+            }
+            for i in items
+        ]
+    except Exception as e:
+        print(f"[config] WARNING: failed to parse TEAMS: {e}", flush=True)
+        return []
+
+TEAMS = _parse_teams()
+
+# Maps GitHub logins to Slack member IDs (e.g. {"alice": "U01ABCDEF"}).
+# Used in run_nudge() to pass IDs directly, bypassing slack_search_users.
+def _parse_slack_ids():
+    raw = os.environ.get("SLACK_IDS", "").strip()
+    if not raw:
+        return {}
+    result = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" in pair:
+            login, slack_id = pair.split(":", 1)
+            result[login.strip()] = slack_id.strip()
+    return result
+
+SLACK_ID_MAP = _parse_slack_ids()
+
 # GitHub Actions environments the Deploy button can target.
 # For each name, the dashboard looks up a workflow whose filename starts with the env
 # and dispatches it against the PR's head branch via `gh workflow run`.
@@ -134,31 +174,6 @@ def _is_bot_login(login):
     return login in KNOWN_BOT_LOGINS
 
 
-def _thread_addressed_by_author(cnodes, reviewer_login, me, last_commit_date):
-    """True if an unresolved thread looks like I (the PR author) have already
-    addressed it: my comment is the most recent in the thread AND there's been
-    a commit after the reviewer's last comment in this thread.
-
-    Reviewers still control resolution — this is just a heuristic so the
-    dashboard doesn't keep nagging once I've replied + pushed a fix.
-    """
-    if not cnodes or not last_commit_date:
-        return False
-    sorted_comments = sorted(cnodes, key=lambda c: c.get("createdAt") or "")
-    last_comment = sorted_comments[-1]
-    last_author = (last_comment.get("author") or {}).get("login")
-    if last_author != me:
-        return False
-    reviewer_last_at = max(
-        (c.get("createdAt") or "" for c in cnodes
-         if (c.get("author") or {}).get("login") == reviewer_login),
-        default="",
-    )
-    if not reviewer_last_at:
-        return False
-    return last_commit_date > reviewer_last_at
-
-
 def determine_my_pr_status(pr, me):
     """Categorize one of my open PRs.
 
@@ -180,14 +195,6 @@ def determine_my_pr_status(pr, me):
     }
     approvers.discard(None)
 
-    commit_nodes = (pr.get("commits") or {}).get("nodes") or []
-    commit_dates = []
-    for c in commit_nodes:
-        d = ((c.get("commit") or {}).get("committedDate")) or ""
-        if d:
-            commit_dates.append(d)
-    last_commit_date = max(commit_dates) if commit_dates else ""
-
     unresolved_inline_authors = set()
     addressed_inline_authors = set()
     for t in threads:
@@ -196,16 +203,12 @@ def determine_my_pr_status(pr, me):
         cnodes = (t.get("comments") or {}).get("nodes") or []
         if not cnodes:
             continue
-        first_author = cnodes[0].get("author") or {}
-        if not _is_human_author(first_author):
+        author = cnodes[0].get("author") or {}
+        if not _is_human_author(author):
             continue
-        login = first_author.get("login")
-        if not login or login in approvers:
-            continue
-        if _thread_addressed_by_author(cnodes, login, me, last_commit_date):
-            addressed_inline_authors.add(login)
-            continue
-        unresolved_inline_authors.add(login)
+        login = author.get("login")
+        if login and login not in approvers:
+            unresolved_inline_authors.add(login)
 
     review_body_authors = set()
     for r in latest_reviews:
@@ -226,13 +229,8 @@ def determine_my_pr_status(pr, me):
         if not _is_human_author(author):
             continue
         login = author.get("login")
-        if not login or login == me or login in approvers:
-            continue
-        comment_at = c.get("createdAt") or ""
-        if last_commit_date and comment_at and last_commit_date > comment_at:
-            addressed_general_authors.add(login)
-            continue
-        general_comment_authors.add(login)
+        if login and login != me and login not in approvers:
+            general_comment_authors.add(login)
 
     active = (
         unresolved_inline_authors | review_body_authors | general_comment_authors
@@ -337,11 +335,8 @@ query($q: String!) {
         reviewThreads(first: 50) {
           nodes {
             isResolved
-            comments(first: 50) {
-              nodes {
-                author { login __typename }
-                createdAt
-              }
+            comments(first: 1) {
+              nodes { author { login __typename } }
             }
           }
         }
@@ -349,11 +344,6 @@ query($q: String!) {
           nodes {
             author { login __typename }
             createdAt
-          }
-        }
-        commits(last: 50) {
-          nodes {
-            commit { committedDate }
           }
         }
       }
@@ -1262,7 +1252,7 @@ NUDGE_PROMPT = (
     "I want to nudge these GitHub reviewers on Slack about my open PR:\n"
     "  PR: {url}\n"
     "  Title: {title}\n"
-    "  Reviewers (GitHub logins): {reviewers}\n"
+    "  Reviewers (GitHub logins or Slack member IDs): {reviewers}\n"
     "  Mode: {mode}\n"
     "  Channel ID: {channel}\n\n"
     "Mode meanings:\n"
@@ -1305,23 +1295,26 @@ def derive_nudge_result(events, mode="re_review"):
     return {"sent": sent, "label": label}
 
 
-def run_nudge(job, url, title, reviewers, mode):
+def run_nudge(job, url, title, reviewers, mode, channel_id=None):
     """Spawn Claude to DM the reviewers on Slack via the Slack MCP."""
+    if channel_id is None:
+        channel_id = TEAM_CHANNEL_ID
+    resolved_reviewers = [SLACK_ID_MAP.get(r, r) for r in reviewers]
     repo = job.repo
     number = job.number
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = f"{LOG_DIR}/nudge-{repo_flat(repo)}-{number}-{int(time.time())}.log"
     job.log_path = log_path
     venue = (
-        f"#channel {TEAM_CHANNEL_ID}" if mode == "channel"
-        else f"{len(reviewers)} DM(s)"
+        f"#channel {channel_id}" if mode == "channel"
+        else f"{len(resolved_reviewers)} DM(s)"
     )
-    job.append(f"Nudging on Slack ({mode}, {venue}): {', '.join(reviewers)}")
-    print(f"[nudge] starting #{number} in {repo} mode={mode} reviewers={reviewers}", flush=True)
+    job.append(f"Nudging on Slack ({mode}, {venue}): {', '.join(resolved_reviewers)}")
+    print(f"[nudge] starting #{number} in {repo} mode={mode} reviewers={resolved_reviewers}", flush=True)
 
     prompt = NUDGE_PROMPT.format(
-        url=url, title=title, reviewers=", ".join(reviewers),
-        mode=mode, channel=TEAM_CHANNEL_ID,
+        url=url, title=title, reviewers=", ".join(resolved_reviewers),
+        mode=mode, channel=channel_id,
     )
     events = []
     try:
@@ -1660,6 +1653,83 @@ INDEX_HTML = r"""<!doctype html>
   }
   .btn-notify:hover:not(:disabled) { background: #e8429a; }
   .btn-notify:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
+  .nudge-split { position: relative; display: inline-flex; }
+  .nudge-split .btn-nudge {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .btn-nudge-caret {
+    background: #6e40c9;
+    color: #fff;
+    border: none;
+    border-left: 1px solid rgba(0,0,0,0.25);
+    padding: 6px 8px;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1;
+  }
+  .btn-nudge-caret:hover:not(:disabled) { background: #8957e5; }
+  .nudge-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 160px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: 4px;
+    z-index: 10;
+  }
+  .nudge-menu .menu-item,
+  .channel-menu .menu-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .nudge-menu .menu-item:hover,
+  .channel-menu .menu-item:hover { background: #1c2128; }
+  .channel-split { position: relative; display: inline-flex; }
+  .channel-split .btn-channel {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .btn-channel-caret {
+    background: #d97706;
+    color: #fff;
+    border: none;
+    border-left: 1px solid rgba(0,0,0,0.25);
+    padding: 6px 8px;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1;
+  }
+  .btn-channel-caret:hover:not(:disabled) { background: #f59e0b; }
+  .channel-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 160px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: 4px;
+    z-index: 10;
+  }
   .review-status.merged { background: rgba(35,134,54,0.15); color: #56d364; border-color: rgba(35,134,54,0.4); }
   .pr-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
   .btn-open {
@@ -1868,6 +1938,18 @@ function render(prs) {
   for (const btn of document.querySelectorAll('.btn-update-branch')) {
     btn.addEventListener('click', onUpdateBranch);
   }
+  for (const btn of document.querySelectorAll('.btn-nudge-caret')) {
+    btn.addEventListener('click', onNudgeCaret);
+  }
+  for (const btn of document.querySelectorAll('.btn-channel-caret')) {
+    btn.addEventListener('click', onChannelCaret);
+  }
+  for (const btn of document.querySelectorAll('.btn-nudge-team')) {
+    btn.addEventListener('click', onNudgeTeam);
+  }
+  for (const btn of document.querySelectorAll('.btn-channel-team')) {
+    btn.addEventListener('click', onChannelTeam);
+  }
 }
 
 function closeAllMergeMenus() {
@@ -1881,9 +1963,11 @@ function closeAllMergeMenus() {
 
 document.addEventListener('click', (ev) => {
   if (!ev.target.closest('.merge-split')) closeAllMergeMenus();
+  if (!ev.target.closest('.nudge-split')) closeAllNudgeMenus();
+  if (!ev.target.closest('.channel-split')) closeAllChannelMenus();
 });
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape') closeAllMergeMenus();
+  if (ev.key === 'Escape') { closeAllMergeMenus(); closeAllNudgeMenus(); closeAllChannelMenus(); }
 });
 
 function onMergeCaret(ev) {
@@ -1892,6 +1976,40 @@ function onMergeCaret(ev) {
   const menu = caret.parentElement.querySelector('.merge-menu');
   const willOpen = menu.hidden;
   closeAllMergeMenus();
+  if (willOpen) {
+    menu.hidden = false;
+    caret.setAttribute('aria-expanded', 'true');
+  }
+}
+
+function closeAllNudgeMenus() {
+  for (const menu of document.querySelectorAll('.nudge-menu')) menu.hidden = true;
+  for (const caret of document.querySelectorAll('.btn-nudge-caret')) caret.setAttribute('aria-expanded', 'false');
+}
+
+function closeAllChannelMenus() {
+  for (const menu of document.querySelectorAll('.channel-menu')) menu.hidden = true;
+  for (const caret of document.querySelectorAll('.btn-channel-caret')) caret.setAttribute('aria-expanded', 'false');
+}
+
+function onNudgeCaret(ev) {
+  ev.stopPropagation();
+  const caret = ev.currentTarget;
+  const menu = caret.parentElement.querySelector('.nudge-menu');
+  const willOpen = menu.hidden;
+  closeAllNudgeMenus();
+  if (willOpen) {
+    menu.hidden = false;
+    caret.setAttribute('aria-expanded', 'true');
+  }
+}
+
+function onChannelCaret(ev) {
+  ev.stopPropagation();
+  const caret = ev.currentTarget;
+  const menu = caret.parentElement.querySelector('.channel-menu');
+  const willOpen = menu.hidden;
+  closeAllChannelMenus();
   if (willOpen) {
     menu.hidden = false;
     caret.setAttribute('aria-expanded', 'true');
@@ -1940,12 +2058,44 @@ function renderMyPR(p) {
     actionBtn = `<button class="btn-address" type="button">Address</button>`;
   }
   const nudgeTitle = mode === 'fresh'
-    ? 'DM Steve and Pratik to ask for first review'
+    ? 'DM to ask for first review'
     : (mode === 're_review'
         ? 'DM stale reviewers asking them to take another look'
         : 'No one to nudge');
-  const nudgeBtn = `<button class="btn-nudge" type="button" title="${escapeHtml(nudgeTitle)}">Nudge</button>`;
-  const channelBtn = `<button class="btn-channel" type="button" title="Post in team channel tagging Steve and Pratik">#Channel</button>`;
+  let nudgeBtn;
+  if (mode === 'fresh' && CONFIG.teams && CONFIG.teams.length > 0) {
+    const teamItems = CONFIG.teams.map(t =>
+      `<button class="menu-item btn-nudge-team" type="button"
+         data-team-name="${escapeHtml(t.name)}"
+         data-team-reviewers="${escapeHtml(t.reviewers.join(','))}"
+         title="Ask ${escapeHtml(t.name)} reviewers on Slack">${escapeHtml(t.name)}</button>`
+    ).join('');
+    nudgeBtn = `<div class="nudge-split">
+      <button class="btn-nudge" type="button" title="${escapeHtml(nudgeTitle)}">Nudge</button>
+      <button class="btn-nudge-caret" type="button" aria-label="Nudge a different team" aria-haspopup="true" aria-expanded="false">▾</button>
+      <div class="nudge-menu" hidden>${teamItems}</div>
+    </div>`;
+  } else {
+    nudgeBtn = `<button class="btn-nudge" type="button" title="${escapeHtml(nudgeTitle)}">Nudge</button>`;
+  }
+  const defaultChannelLabel = (CONFIG.fresh_reviewers || []).join(' and ') || 'the team';
+  let channelBtn;
+  if (CONFIG.teams && CONFIG.teams.length > 0) {
+    const teamItems = CONFIG.teams.map(t =>
+      `<button class="menu-item btn-channel-team" type="button"
+         data-team-name="${escapeHtml(t.name)}"
+         data-team-channel-id="${escapeHtml(t.channel_id)}"
+         data-team-reviewers="${escapeHtml(t.reviewers.join(','))}"
+         title="Post in ${escapeHtml(t.name)} channel">${escapeHtml(t.name)}</button>`
+    ).join('');
+    channelBtn = `<div class="channel-split">
+      <button class="btn-channel" type="button" title="Post in team channel tagging ${escapeHtml(defaultChannelLabel)}">#Channel</button>
+      <button class="btn-channel-caret" type="button" aria-label="Post in a different team's channel" aria-haspopup="true" aria-expanded="false">▾</button>
+      <div class="channel-menu" hidden>${teamItems}</div>
+    </div>`;
+  } else {
+    channelBtn = `<button class="btn-channel" type="button" title="Post in team channel tagging ${escapeHtml(defaultChannelLabel)}">#Channel</button>`;
+  }
   const deployBtns = (CONFIG.deploy_envs || []).map(env =>
     `<button class="btn-deploy" type="button" data-env="${escapeHtml(env)}" title="Run the ${escapeHtml(env)} workflow against ${escapeHtml(p.headRefName)}">🚀 ${escapeHtml(env)}</button>`
   ).join('');
@@ -2170,6 +2320,77 @@ async function onChannelPing(ev) {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ number, repo, url, title, reviewers: targets, mode: 'channel' }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || ('HTTP ' + res.status));
+    }
+  } catch (e) {
+    toast(`Failed to start: ${e.message}`, true);
+    return;
+  }
+  setRunning(card, 'Posting in channel…');
+  streamJob(card, 'nudge', repo, number, url, finishNudge);
+}
+
+async function onNudgeTeam(ev) {
+  const btn = ev.currentTarget;
+  const card = btn.closest('.pr');
+  const number = parseInt(card.dataset.number, 10);
+  const repo = card.dataset.repo;
+  const url = card.dataset.url;
+  const title = card.dataset.title || '';
+  const teamName = btn.dataset.teamName || 'team';
+  const reviewers = (btn.dataset.teamReviewers || '').split(',').map(s => s.trim()).filter(Boolean);
+  closeAllNudgeMenus();
+  if (!reviewers.length) {
+    toast(`No reviewers configured for team "${teamName}".`, true);
+    return;
+  }
+  if (!confirm(`Ask ${reviewers.join(' and ')} (${teamName}) on Slack to review this PR?`)) return;
+  try {
+    const res = await fetch('/api/nudge', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ number, repo, url, title, reviewers, mode: 'fresh' }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || ('HTTP ' + res.status));
+    }
+  } catch (e) {
+    toast(`Failed to start: ${e.message}`, true);
+    return;
+  }
+  setRunning(card, 'Nudging…');
+  streamJob(card, 'nudge', repo, number, url, finishNudge);
+}
+
+async function onChannelTeam(ev) {
+  const btn = ev.currentTarget;
+  const card = btn.closest('.pr');
+  const number = parseInt(card.dataset.number, 10);
+  const repo = card.dataset.repo;
+  const url = card.dataset.url;
+  const title = card.dataset.title || '';
+  const teamName = btn.dataset.teamName || 'team';
+  const channelId = btn.dataset.teamChannelId || '';
+  const reviewers = (btn.dataset.teamReviewers || '').split(',').map(s => s.trim()).filter(Boolean);
+  closeAllChannelMenus();
+  if (!channelId) {
+    toast(`No channel_id configured for team "${teamName}".`, true);
+    return;
+  }
+  if (!reviewers.length) {
+    toast(`No reviewers configured for team "${teamName}".`, true);
+    return;
+  }
+  if (!confirm(`Post in ${teamName} channel tagging ${reviewers.join(' and ')}?`)) return;
+  try {
+    const res = await fetch('/api/nudge', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ number, repo, url, title, reviewers, mode: 'channel', channel_id: channelId }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -2476,6 +2697,7 @@ class Handler(BaseHTTPRequestHandler):
             config_json = json.dumps({
                 "fresh_reviewers": FRESH_REVIEWERS,
                 "team_channel_id": TEAM_CHANNEL_ID,
+                "teams": TEAMS,
                 "deploy_envs": DEPLOY_ENVS,
                 "deploy_notify_channel_id": DEPLOY_NOTIFY_CHANNEL_ID,
                 "deploy_notify_channel_name": DEPLOY_NOTIFY_CHANNEL_NAME,
@@ -2671,6 +2893,7 @@ class Handler(BaseHTTPRequestHandler):
             title = str(data.get("title") or "")
             reviewers = data.get("reviewers") or []
             mode = str(data.get("mode") or "re_review")
+            channel_id = str(data.get("channel_id") or TEAM_CHANNEL_ID)
             if "/" not in repo:
                 raise ValueError("repo must be owner/name")
             if mode not in ("re_review", "fresh", "channel"):
@@ -2684,7 +2907,7 @@ class Handler(BaseHTTPRequestHandler):
         job, started = get_or_create_job(repo, number, "nudge")
         if started:
             threading.Thread(
-                target=run_nudge, args=(job, url, title, reviewers, mode), daemon=True,
+                target=run_nudge, args=(job, url, title, reviewers, mode, channel_id), daemon=True,
             ).start()
         self._send_json(202, {
             "started": started,

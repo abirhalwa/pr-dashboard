@@ -8,3 +8,5 @@ __pycache__/
 
 # Design/spec/plan docs are local-only per CLAUDE.md rule.
 docs/
+
+*.local.md
