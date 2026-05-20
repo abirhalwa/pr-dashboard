@@ -174,6 +174,31 @@ def _is_bot_login(login):
     return login in KNOWN_BOT_LOGINS
 
 
+def _thread_addressed_by_author(cnodes, reviewer_login, me, last_commit_date):
+    """True if an unresolved thread looks like I (the PR author) have already
+    addressed it: my comment is the most recent in the thread AND there's been
+    a commit after the reviewer's last comment in this thread.
+
+    Reviewers still control resolution — this is just a heuristic so the
+    dashboard doesn't keep nagging once I've replied + pushed a fix.
+    """
+    if not cnodes or not last_commit_date:
+        return False
+    sorted_comments = sorted(cnodes, key=lambda c: c.get("createdAt") or "")
+    last_comment = sorted_comments[-1]
+    last_author = (last_comment.get("author") or {}).get("login")
+    if last_author != me:
+        return False
+    reviewer_last_at = max(
+        (c.get("createdAt") or "" for c in cnodes
+         if (c.get("author") or {}).get("login") == reviewer_login),
+        default="",
+    )
+    if not reviewer_last_at:
+        return False
+    return last_commit_date > reviewer_last_at
+
+
 def determine_my_pr_status(pr, me):
     """Categorize one of my open PRs.
 
@@ -195,6 +220,14 @@ def determine_my_pr_status(pr, me):
     }
     approvers.discard(None)
 
+    commit_nodes = (pr.get("commits") or {}).get("nodes") or []
+    commit_dates = []
+    for c in commit_nodes:
+        d = ((c.get("commit") or {}).get("committedDate")) or ""
+        if d:
+            commit_dates.append(d)
+    last_commit_date = max(commit_dates) if commit_dates else ""
+
     unresolved_inline_authors = set()
     addressed_inline_authors = set()
     for t in threads:
@@ -203,12 +236,15 @@ def determine_my_pr_status(pr, me):
         cnodes = (t.get("comments") or {}).get("nodes") or []
         if not cnodes:
             continue
-        author = cnodes[0].get("author") or {}
-        if not _is_human_author(author):
+        first_author = cnodes[0].get("author") or {}
+        if not _is_human_author(first_author):
             continue
-        login = author.get("login")
-        if login and login not in approvers:
-            unresolved_inline_authors.add(login)
+        login = first_author.get("login")
+        if not login or login in approvers:
+            continue
+        if _thread_addressed_by_author(cnodes, login, me, last_commit_date):
+            continue
+        unresolved_inline_authors.add(login)
 
     review_body_authors = set()
     for r in latest_reviews:
@@ -229,8 +265,12 @@ def determine_my_pr_status(pr, me):
         if not _is_human_author(author):
             continue
         login = author.get("login")
-        if login and login != me and login not in approvers:
-            general_comment_authors.add(login)
+        if not login or login == me or login in approvers:
+            continue
+        comment_at = c.get("createdAt") or ""
+        if last_commit_date and comment_at and last_commit_date > comment_at:
+            continue
+        general_comment_authors.add(login)
 
     active = (
         unresolved_inline_authors | review_body_authors | general_comment_authors
@@ -335,8 +375,11 @@ query($q: String!) {
         reviewThreads(first: 50) {
           nodes {
             isResolved
-            comments(first: 1) {
-              nodes { author { login __typename } }
+            comments(first: 50) {
+              nodes {
+                author { login __typename }
+                createdAt
+              }
             }
           }
         }
@@ -344,6 +387,11 @@ query($q: String!) {
           nodes {
             author { login __typename }
             createdAt
+          }
+        }
+        commits(last: 50) {
+          nodes {
+            commit { committedDate }
           }
         }
       }
