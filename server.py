@@ -243,6 +243,7 @@ def determine_my_pr_status(pr, me):
         if not login or login in approvers:
             continue
         if _thread_addressed_by_author(cnodes, login, me, last_commit_date):
+            addressed_inline_authors.add(login)
             continue
         unresolved_inline_authors.add(login)
 
@@ -269,6 +270,7 @@ def determine_my_pr_status(pr, me):
             continue
         comment_at = c.get("createdAt") or ""
         if last_commit_date and comment_at and last_commit_date > comment_at:
+            addressed_general_authors.add(login)
             continue
         general_comment_authors.add(login)
 
