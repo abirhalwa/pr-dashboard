@@ -221,8 +221,12 @@ def determine_my_pr_status(pr, me):
         if not _is_human_author(author):
             continue
         login = author.get("login")
-        if login and login != me and login not in approvers:
-            general_comment_authors.add(login)
+        if not login or login == me or login in approvers:
+            continue
+        comment_at = c.get("createdAt") or ""
+        if last_commit_date and comment_at and last_commit_date > comment_at:
+            continue
+        general_comment_authors.add(login)
 
     active = (
         unresolved_inline_authors | review_body_authors | general_comment_authors
