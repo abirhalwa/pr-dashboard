@@ -132,6 +132,31 @@ def _is_bot_login(login):
     return login in KNOWN_BOT_LOGINS
 
 
+def _thread_addressed_by_author(cnodes, reviewer_login, me, last_commit_date):
+    """True if an unresolved thread looks like I (the PR author) have already
+    addressed it: my comment is the most recent in the thread AND there's been
+    a commit after the reviewer's last comment in this thread.
+
+    Reviewers still control resolution — this is just a heuristic so the
+    dashboard doesn't keep nagging once I've replied + pushed a fix.
+    """
+    if not cnodes or not last_commit_date:
+        return False
+    sorted_comments = sorted(cnodes, key=lambda c: c.get("createdAt") or "")
+    last_comment = sorted_comments[-1]
+    last_author = (last_comment.get("author") or {}).get("login")
+    if last_author != me:
+        return False
+    reviewer_last_at = max(
+        (c.get("createdAt") or "" for c in cnodes
+         if (c.get("author") or {}).get("login") == reviewer_login),
+        default="",
+    )
+    if not reviewer_last_at:
+        return False
+    return last_commit_date > reviewer_last_at
+
+
 def determine_my_pr_status(pr, me):
     """Categorize one of my open PRs.
 
@@ -300,8 +325,11 @@ query($q: String!) {
         reviewThreads(first: 50) {
           nodes {
             isResolved
-            comments(first: 1) {
-              nodes { author { login __typename } }
+            comments(first: 50) {
+              nodes {
+                author { login __typename }
+                createdAt
+              }
             }
           }
         }
@@ -309,6 +337,11 @@ query($q: String!) {
           nodes {
             author { login __typename }
             createdAt
+          }
+        }
+        commits(last: 50) {
+          nodes {
+            commit { committedDate }
           }
         }
       }
