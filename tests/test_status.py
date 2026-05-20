@@ -256,6 +256,62 @@ class DetermineMyPrStatus(unittest.TestCase):
         self.assertIsNone(out["nudge_mode"])
         self.assertEqual(out["nudge_targets"], [])
 
+    def test_thread_treated_as_addressed_after_reply_plus_commit(self):
+        t = thread("alice", comments=[
+            thread_comment("alice", "2026-05-01T10:00:00Z"),
+            thread_comment(self.me, "2026-05-02T10:00:00Z"),
+        ])
+        out = determine_my_pr_status(
+            pr(review_decision="REVIEW_REQUIRED",
+               review_threads=[t],
+               commits=[commit_node("2026-05-02T09:00:00Z")]),
+            self.me,
+        )
+        self.assertEqual(out["status"], "not_reviewed_yet")
+        self.assertEqual(out["active_commenters"], [])
+
+    def test_thread_still_flagged_when_reply_but_no_commit(self):
+        t = thread("alice", comments=[
+            thread_comment("alice", "2026-05-01T10:00:00Z"),
+            thread_comment(self.me, "2026-05-02T10:00:00Z"),
+        ])
+        out = determine_my_pr_status(
+            pr(review_decision="REVIEW_REQUIRED",
+               review_threads=[t]),
+            self.me,
+        )
+        self.assertEqual(out["status"], "has_comments")
+        self.assertEqual(out["active_commenters"], ["alice"])
+
+    def test_thread_still_flagged_when_commit_predates_reviewer_comment(self):
+        t = thread("alice", comments=[
+            thread_comment("alice", "2026-05-02T10:00:00Z"),
+            thread_comment(self.me, "2026-05-03T10:00:00Z"),
+        ])
+        out = determine_my_pr_status(
+            pr(review_decision="REVIEW_REQUIRED",
+               review_threads=[t],
+               commits=[commit_node("2026-05-01T10:00:00Z")]),
+            self.me,
+        )
+        self.assertEqual(out["status"], "has_comments")
+        self.assertEqual(out["active_commenters"], ["alice"])
+
+    def test_thread_still_flagged_when_reviewer_replied_last(self):
+        t = thread("alice", comments=[
+            thread_comment("alice", "2026-05-01T10:00:00Z"),
+            thread_comment(self.me, "2026-05-02T10:00:00Z"),
+            thread_comment("alice", "2026-05-03T10:00:00Z"),
+        ])
+        out = determine_my_pr_status(
+            pr(review_decision="REVIEW_REQUIRED",
+               review_threads=[t],
+               commits=[commit_node("2026-05-02T09:00:00Z")]),
+            self.me,
+        )
+        self.assertEqual(out["status"], "has_comments")
+        self.assertEqual(out["active_commenters"], ["alice"])
+
 
 if __name__ == "__main__":
     unittest.main()
