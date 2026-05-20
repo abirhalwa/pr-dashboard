@@ -80,12 +80,14 @@ STATUS_LABELS = {
 MY_STATUS_ORDER = {
     "approved": 0,
     "has_comments": 1,
-    "not_reviewed_yet": 2,
+    "comments_addressed": 2,
+    "not_reviewed_yet": 3,
 }
 
 MY_STATUS_LABELS = {
     "approved": "Approved",
     "has_comments": "Has comments",
+    "comments_addressed": "Comments addressed",
     "not_reviewed_yet": "Not reviewed yet",
 }
 
@@ -187,6 +189,7 @@ def determine_my_pr_status(pr, me):
     last_commit_date = max(commit_dates) if commit_dates else ""
 
     unresolved_inline_authors = set()
+    addressed_inline_authors = set()
     for t in threads:
         if t.get("isResolved"):
             continue
@@ -200,6 +203,7 @@ def determine_my_pr_status(pr, me):
         if not login or login in approvers:
             continue
         if _thread_addressed_by_author(cnodes, login, me, last_commit_date):
+            addressed_inline_authors.add(login)
             continue
         unresolved_inline_authors.add(login)
 
@@ -216,6 +220,7 @@ def determine_my_pr_status(pr, me):
     review_body_authors -= approvers
 
     general_comment_authors = set()
+    addressed_general_authors = set()
     for c in comments:
         author = c.get("author") or {}
         if not _is_human_author(author):
@@ -225,6 +230,7 @@ def determine_my_pr_status(pr, me):
             continue
         comment_at = c.get("createdAt") or ""
         if last_commit_date and comment_at and last_commit_date > comment_at:
+            addressed_general_authors.add(login)
             continue
         general_comment_authors.add(login)
 
@@ -247,6 +253,8 @@ def determine_my_pr_status(pr, me):
         status = "approved"
     elif active:
         status = "has_comments"
+    elif addressed_inline_authors or addressed_general_authors:
+        status = "comments_addressed"
     else:
         status = "not_reviewed_yet"
 
@@ -1534,6 +1542,7 @@ INDEX_HTML = r"""<!doctype html>
   .badge-untouched { background: #30363d; color: var(--text); }
   .badge-approved { background: #238636; color: #fff; }
   .badge-has_comments { background: #fb8500; color: #fff; }
+  .badge-comments_addressed { background: #1f6feb; color: #fff; }
   .badge-not_reviewed_yet { background: #30363d; color: var(--text); }
   .btn-merge {
     background: var(--green);
@@ -1780,10 +1789,11 @@ const TABS = {
   mine: {
     title: '🚀 My open PRs',
     endpoint: '/api/prs/mine',
-    groups: ['approved', 'has_comments', 'not_reviewed_yet'],
+    groups: ['approved', 'has_comments', 'comments_addressed', 'not_reviewed_yet'],
     headers: {
       approved: 'Approved — ready to merge',
       has_comments: 'Has comments to address',
+      comments_addressed: 'Comments addressed — awaiting re-review',
       not_reviewed_yet: 'Not reviewed yet',
     },
     render: renderMyPR,
