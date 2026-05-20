@@ -107,14 +107,19 @@ def _parse_teams():
         items = json.loads(raw)
         if not isinstance(items, list):
             raise ValueError("TEAMS must be a JSON array")
-        return [
-            {
-                "name": str(i["name"]),
-                "channel_id": str(i["channel_id"]),
+        out = []
+        for i in items:
+            name = (i.get("name") or "").strip()
+            chan = (i.get("channel_id") or "").strip()
+            if not name or not chan:
+                print(f"[config] WARNING: skipping TEAMS entry with missing name/channel_id: {i!r}", flush=True)
+                continue
+            out.append({
+                "name": name,
+                "channel_id": chan,
                 "reviewers": [str(r) for r in i.get("reviewers", [])],
-            }
-            for i in items
-        ]
+            })
+        return out
     except Exception as e:
         print(f"[config] WARNING: failed to parse TEAMS: {e}", flush=True)
         return []
@@ -130,9 +135,16 @@ def _parse_slack_ids():
     result = {}
     for pair in raw.split(","):
         pair = pair.strip()
-        if ":" in pair:
-            login, slack_id = pair.split(":", 1)
-            result[login.strip()] = slack_id.strip()
+        if not pair:
+            continue
+        if ":" not in pair:
+            print(f"[config] WARNING: SLACK_IDS pair missing ':' — {pair!r}", flush=True)
+            continue
+        login, slack_id = (s.strip() for s in pair.split(":", 1))
+        if not login or not slack_id.startswith("U"):
+            print(f"[config] WARNING: invalid SLACK_IDS pair — {pair!r}", flush=True)
+            continue
+        result[login] = slack_id
     return result
 
 SLACK_ID_MAP = _parse_slack_ids()
@@ -1359,8 +1371,8 @@ def run_nudge(job, url, title, reviewers, mode, channel_id=None):
         f"#channel {channel_id}" if mode == "channel"
         else f"{len(resolved_reviewers)} DM(s)"
     )
-    job.append(f"Nudging on Slack ({mode}, {venue}): {', '.join(resolved_reviewers)}")
-    print(f"[nudge] starting #{number} in {repo} mode={mode} reviewers={resolved_reviewers}", flush=True)
+    job.append(f"Nudging on Slack ({mode}, {venue}): {', '.join(reviewers)}")
+    print(f"[nudge] starting #{number} in {repo} mode={mode} reviewers={reviewers}", flush=True)
 
     prompt = NUDGE_PROMPT.format(
         url=url, title=title, reviewers=", ".join(resolved_reviewers),
@@ -2117,7 +2129,7 @@ function renderMyPR(p) {
     const teamItems = CONFIG.teams.map(t =>
       `<button class="menu-item btn-nudge-team" type="button"
          data-team-name="${escapeHtml(t.name)}"
-         data-team-reviewers="${escapeHtml(t.reviewers.join(','))}"
+         data-team-reviewers="${escapeHtml(JSON.stringify(t.reviewers))}"
          title="Ask ${escapeHtml(t.name)} reviewers on Slack">${escapeHtml(t.name)}</button>`
     ).join('');
     nudgeBtn = `<div class="nudge-split">
@@ -2135,7 +2147,7 @@ function renderMyPR(p) {
       `<button class="menu-item btn-channel-team" type="button"
          data-team-name="${escapeHtml(t.name)}"
          data-team-channel-id="${escapeHtml(t.channel_id)}"
-         data-team-reviewers="${escapeHtml(t.reviewers.join(','))}"
+         data-team-reviewers="${escapeHtml(JSON.stringify(t.reviewers))}"
          title="Post in ${escapeHtml(t.name)} channel">${escapeHtml(t.name)}</button>`
     ).join('');
     channelBtn = `<div class="channel-split">
@@ -2391,7 +2403,7 @@ async function onNudgeTeam(ev) {
   const url = card.dataset.url;
   const title = card.dataset.title || '';
   const teamName = btn.dataset.teamName || 'team';
-  const reviewers = (btn.dataset.teamReviewers || '').split(',').map(s => s.trim()).filter(Boolean);
+  const reviewers = JSON.parse(btn.dataset.teamReviewers || '[]');
   closeAllNudgeMenus();
   if (!reviewers.length) {
     toast(`No reviewers configured for team "${teamName}".`, true);
@@ -2425,7 +2437,7 @@ async function onChannelTeam(ev) {
   const title = card.dataset.title || '';
   const teamName = btn.dataset.teamName || 'team';
   const channelId = btn.dataset.teamChannelId || '';
-  const reviewers = (btn.dataset.teamReviewers || '').split(',').map(s => s.trim()).filter(Boolean);
+  const reviewers = JSON.parse(btn.dataset.teamReviewers || '[]');
   closeAllChannelMenus();
   if (!channelId) {
     toast(`No channel_id configured for team "${teamName}".`, true);
@@ -2944,6 +2956,9 @@ class Handler(BaseHTTPRequestHandler):
             reviewers = data.get("reviewers") or []
             mode = str(data.get("mode") or "re_review")
             channel_id = str(data.get("channel_id") or TEAM_CHANNEL_ID)
+            allowed_channels = {TEAM_CHANNEL_ID, *(t["channel_id"] for t in TEAMS)} - {""}
+            if channel_id and channel_id not in allowed_channels:
+                raise ValueError("channel_id not in allow-list")
             if "/" not in repo:
                 raise ValueError("repo must be owner/name")
             if mode not in ("re_review", "fresh", "channel"):
