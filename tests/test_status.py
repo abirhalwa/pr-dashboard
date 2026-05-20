@@ -13,6 +13,7 @@ def pr(
     latest_reviews=None,
     review_threads=None,
     comments=None,
+    commits=None,
 ):
     return {
         "isDraft": is_draft,
@@ -20,6 +21,7 @@ def pr(
         "latestReviews": {"nodes": latest_reviews or []},
         "reviewThreads": {"nodes": review_threads or []},
         "comments": {"nodes": comments or []},
+        "commits": {"nodes": commits or []},
     }
 
 
@@ -31,11 +33,24 @@ def review(login, state, submitted_at="2026-05-01T00:00:00Z", typename="User"):
     }
 
 
-def thread(login, resolved=False, typename="User"):
+def thread(login, resolved=False, typename="User", comments=None):
+    if comments is None:
+        comments = [{"author": {"login": login, "__typename": typename}}]
     return {
         "isResolved": resolved,
-        "comments": {"nodes": [{"author": {"login": login, "__typename": typename}}]},
+        "comments": {"nodes": comments},
     }
+
+
+def thread_comment(login, created_at="2026-05-01T00:00:00Z", typename="User"):
+    return {
+        "author": {"login": login, "__typename": typename},
+        "createdAt": created_at,
+    }
+
+
+def commit_node(committed_at):
+    return {"commit": {"committedDate": committed_at}}
 
 
 def comment(login, created_at="2026-05-01T00:00:00Z", typename="User"):
