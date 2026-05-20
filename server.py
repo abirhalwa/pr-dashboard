@@ -153,6 +153,14 @@ def determine_my_pr_status(pr, me):
     }
     approvers.discard(None)
 
+    commit_nodes = (pr.get("commits") or {}).get("nodes") or []
+    commit_dates = []
+    for c in commit_nodes:
+        d = ((c.get("commit") or {}).get("committedDate")) or ""
+        if d:
+            commit_dates.append(d)
+    last_commit_date = max(commit_dates) if commit_dates else ""
+
     unresolved_inline_authors = set()
     for t in threads:
         if t.get("isResolved"):
@@ -160,12 +168,15 @@ def determine_my_pr_status(pr, me):
         cnodes = (t.get("comments") or {}).get("nodes") or []
         if not cnodes:
             continue
-        author = cnodes[0].get("author") or {}
-        if not _is_human_author(author):
+        first_author = cnodes[0].get("author") or {}
+        if not _is_human_author(first_author):
             continue
-        login = author.get("login")
-        if login and login not in approvers:
-            unresolved_inline_authors.add(login)
+        login = first_author.get("login")
+        if not login or login in approvers:
+            continue
+        if _thread_addressed_by_author(cnodes, login, me, last_commit_date):
+            continue
+        unresolved_inline_authors.add(login)
 
     review_body_authors = set()
     for r in latest_reviews:
