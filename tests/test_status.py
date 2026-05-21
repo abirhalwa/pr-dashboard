@@ -342,5 +342,6 @@ class DetermineMyPrStatus(unittest.TestCase):
         self.assertEqual(out["active_commenters"], ["alice"])
 
 
+
 if __name__ == "__main__":
     unittest.main()
