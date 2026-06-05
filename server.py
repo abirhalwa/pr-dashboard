@@ -87,7 +87,7 @@ MY_STATUS_ORDER = {
 MY_STATUS_LABELS = {
     "approved": "Approved",
     "has_comments": "Has comments",
-    "comments_addressed": "Comments addressed",
+    "comments_addressed": "Waiting for approval",
     "not_reviewed_yet": "Not reviewed yet",
 }
 
@@ -406,6 +406,22 @@ query($q: String!) {
         commits(last: 50) {
           nodes {
             commit { committedDate }
+          }
+        }
+        lastCommit: commits(last: 1) {
+          nodes {
+            commit {
+              statusCheckRollup {
+                state
+                contexts(first: 100) {
+                  nodes {
+                    __typename
+                    ... on CheckRun { name conclusion status }
+                    ... on StatusContext { context state }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -1183,6 +1199,46 @@ ADDRESS_PROMPT = (
     "Do not deviate."
 )
 
+FIX_CHECKS_PROMPT = (
+    "Fix failing CI checks on PR #{number} in {repo}.\n"
+    "PR head branch on origin: {head_ref}\n"
+    "Local branch in this worktree: {local_branch}\n"
+    "Push with: git push origin {local_branch}:{head_ref}\n"
+    "Failing check names: {failing_names}\n\n"
+    "You are running inside a dedicated agent clone — completely separate from "
+    "any IDE workspace under ~/Desktop. The branch is already checked out. "
+    "Never `cd` out of this clone, never touch any directory under ~/Desktop, "
+    "and never `gh repo clone` to a new path — work entirely in the current "
+    "working directory.\n\n"
+    "Steps:\n"
+    "1. List the PR's checks with `gh pr checks {number} --repo {repo}` to "
+    "confirm which are failing.\n"
+    "2. For each failing check, fetch its logs. Prefer "
+    "`gh run view --log-failed --job <jobId>` (find jobIds via "
+    "`gh run list --branch {head_ref} --json databaseId,headSha,conclusion,name,workflowName -L 20` "
+    "and `gh run view <runId> --json jobs`). For non-Actions status contexts, "
+    "read the `targetUrl` from `gh pr checks {number} --repo {repo} --json name,state,link`.\n"
+    "3. Diagnose the failure from the logs. Reproduce locally where reasonable "
+    "(run the failing test/lint/typecheck/build directly).\n"
+    "4. Fix the underlying issue in code. Do NOT silence the check (no skips, "
+    "no test removals, no lint suppressions) unless the failure itself is a "
+    "test or rule that is clearly wrong — in which case explain in the commit.\n"
+    "5. Scope each fix narrowly. Don't refactor unrelated code. Don't break "
+    "other behavior in the PR — re-read the surrounding diff and check that "
+    "your fix doesn't regress anything.\n"
+    "6. Commit with a message prefixed with the ticket key from the branch "
+    "name (e.g. `[CSI-1812] fix lint`) and push using the refspec above.\n"
+    "7. After pushing, do NOT re-request reviewers and do NOT post comments — "
+    "just stop. The user will check the rerun.\n\n"
+    "Rules:\n"
+    "- Never amend or force-push. Only new commits.\n"
+    "- Never skip hooks (--no-verify) or bypass signing.\n"
+    "- If the failure requires a non-trivial decision (architecture, scope, "
+    "design trade-off), stop and report it instead of guessing.\n"
+    "- If the failing check is flaky and a rerun is the right call, say so "
+    "and stop — don't push an empty commit."
+)
+
 _RE_GIT_PUSH = re.compile(r"(^|[\s;&|])git\s+push\b")
 _RE_INLINE_REPLY = re.compile(r"gh\s+api[^|;&]*\bpulls/\d+/comments/\d+/replies\b")
 _RE_GENERAL_PR_COMMENT = re.compile(r"gh\s+pr\s+comment\b")
@@ -1308,6 +1364,96 @@ def run_address(job, head_ref):
         print(f"[address] finished #{number} result={result['label']}", flush=True)
 
 
+def derive_fix_checks_result(events):
+    """Count git pushes in the Claude stream. Same semantics as address but
+    nothing else to track — no replies, no re-requests.
+    """
+    pushes = 0
+    for ev in events:
+        if ev.get("type") != "assistant":
+            continue
+        for c in ev.get("message", {}).get("content", []):
+            if c.get("type") != "tool_use" or c.get("name") != "Bash":
+                continue
+            cmd = (c.get("input") or {}).get("command") or ""
+            if _RE_GIT_PUSH.search(cmd):
+                pushes += 1
+    if pushes:
+        label = f"Pushed {pushes} commit{'s' if pushes != 1 else ''}"
+    else:
+        label = "No action"
+    return {"pushes": pushes, "label": label}
+
+
+def run_fix_checks(job, head_ref, failing_names):
+    """Spawn Claude in an agent clone to diagnose and fix failing CI checks."""
+    repo = job.repo
+    number = job.number
+
+    with get_repo_lock(repo):
+        try:
+            clone_path, local_branch = prepare_agent_clone(repo, head_ref)
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip()
+            job.append(f"Agent-clone setup failed: {stderr}")
+            job.finish("failed", "clone_error")
+            return
+
+        os.makedirs(LOG_DIR, exist_ok=True)
+        log_path = f"{LOG_DIR}/fix-checks-{repo_flat(repo)}-{number}-{int(time.time())}.log"
+        job.log_path = log_path
+        job.append(f"Agent clone ready at {clone_path} (branch: {local_branch})")
+        print(f"[fix-checks] starting #{number} in {repo} (clone: {clone_path})", flush=True)
+
+        prompt = FIX_CHECKS_PROMPT.format(
+            number=number, repo=repo,
+            head_ref=head_ref, local_branch=local_branch,
+            failing_names=", ".join(failing_names) or "(unknown)",
+        )
+        events = []
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ["claude", "-p", prompt,
+                 "--permission-mode", "bypassPermissions",
+                 "--output-format", "stream-json",
+                 "--verbose"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                cwd=clone_path,
+            )
+            with open(log_path, "w") as logf:
+                for line in proc.stdout:
+                    logf.write(line)
+                    logf.flush()
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    events.append(ev)
+                    friendly = format_event(ev)
+                    if friendly:
+                        job.append(friendly)
+            proc.wait()
+        except Exception as e:
+            job.append(f"Stream error: {e}")
+            job.finish("failed", "stream_error")
+            return
+
+        if proc.returncode != 0:
+            job.append(f"claude exited with code {proc.returncode}")
+            job.finish("failed", f"exit:{proc.returncode}")
+            return
+
+        result = derive_fix_checks_result(events)
+        job.append(result["label"])
+        job.finish("done", result["label"])
+        print(f"[fix-checks] finished #{number} result={result['label']}", flush=True)
+
+
 # ---- Nudge dispatch --------------------------------------------------------
 
 NUDGE_PROMPT = (
@@ -1323,7 +1469,7 @@ NUDGE_PROMPT = (
     "  - fresh: nobody has reviewed this PR yet; "
     "DM each one asking them to review it for the first time.\n"
     "  - channel: post ONE message in the team channel (the Channel ID above) "
-    "tagging the listed reviewers with Slack mentions.\n\n"
+    "using `<!here>` (do NOT tag the listed reviewers individually).\n\n"
     "Follow the 'Nudging reviewers on Slack' workflow in your CLAUDE.md "
     "exactly. Pick the message template that matches the mode. Do not deviate."
 )
@@ -1667,6 +1813,33 @@ INDEX_HTML = r"""<!doctype html>
   }
   .btn-address:hover:not(:disabled) { background: #388bfd; }
   .btn-address:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
+  .btn-fix-checks {
+    background: #da3633;
+    color: #fff;
+    border: none;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .btn-fix-checks:hover:not(:disabled) { background: #f85149; }
+  .btn-fix-checks:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
+  .pr-block-banner {
+    margin-top: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    background: rgba(248, 81, 73, 0.12);
+    border: 1px solid rgba(248, 81, 73, 0.35);
+    color: #ffa198;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .pr-block-banner.pending {
+    background: rgba(210, 153, 34, 0.12);
+    border-color: rgba(210, 153, 34, 0.35);
+    color: #e3b341;
+  }
   .btn-nudge {
     background: #6e40c9;
     color: #fff;
@@ -1679,6 +1852,77 @@ INDEX_HTML = r"""<!doctype html>
   }
   .btn-nudge:hover:not(:disabled) { background: #8957e5; }
   .btn-nudge:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
+  .nudge-split { position: relative; display: inline-flex; }
+  .nudge-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 220px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    padding: 8px;
+    z-index: 10;
+  }
+  .nudge-menu .nudge-template {
+    display: flex;
+    gap: 4px;
+    padding: 2px 2px 8px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 6px;
+  }
+  .nudge-menu .nudge-template button {
+    flex: 1;
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .nudge-menu .nudge-template button[aria-pressed="true"] {
+    background: #6e40c9;
+    border-color: #6e40c9;
+    color: #fff;
+  }
+  .nudge-menu .nudge-section-label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 4px 4px;
+  }
+  .nudge-menu .btn-nudge-target {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .nudge-menu .btn-nudge-target:hover { background: #1c2128; }
+  .nudge-menu .btn-nudge-all {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    color: var(--text);
+    border: none;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    margin-top: 4px;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  .nudge-menu .btn-nudge-all:hover { background: #1c2128; }
   .btn-channel {
     background: #d97706;
     color: #fff;
@@ -1715,26 +1959,20 @@ INDEX_HTML = r"""<!doctype html>
   }
   .btn-notify:hover:not(:disabled) { background: #e8429a; }
   .btn-notify:disabled { background: #1c2128; cursor: not-allowed; opacity: 0.7; }
-  .nudge-split { position: relative; display: inline-flex; }
-  .nudge-split .btn-nudge {
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
-  }
-  .btn-nudge-caret {
+  .nudge-teams-split { position: relative; display: inline-flex; }
+  .btn-nudge-teams-caret {
     background: #6e40c9;
     color: #fff;
     border: none;
-    border-left: 1px solid rgba(0,0,0,0.25);
-    padding: 6px 8px;
-    border-top-right-radius: 6px;
-    border-bottom-right-radius: 6px;
+    padding: 6px 10px;
+    border-radius: 6px;
     cursor: pointer;
     font-size: 13px;
     font-weight: 500;
     line-height: 1;
   }
-  .btn-nudge-caret:hover:not(:disabled) { background: #8957e5; }
-  .nudge-menu {
+  .btn-nudge-teams-caret:hover:not(:disabled) { background: #8957e5; }
+  .nudge-teams-menu {
     position: absolute;
     top: calc(100% + 4px);
     right: 0;
@@ -1746,7 +1984,7 @@ INDEX_HTML = r"""<!doctype html>
     padding: 4px;
     z-index: 10;
   }
-  .nudge-menu .menu-item,
+  .nudge-teams-menu .menu-item,
   .channel-menu .menu-item {
     display: block;
     width: 100%;
@@ -1759,7 +1997,7 @@ INDEX_HTML = r"""<!doctype html>
     cursor: pointer;
     font-size: 13px;
   }
-  .nudge-menu .menu-item:hover,
+  .nudge-teams-menu .menu-item:hover,
   .channel-menu .menu-item:hover { background: #1c2128; }
   .channel-split { position: relative; display: inline-flex; }
   .channel-split .btn-channel {
@@ -1925,7 +2163,7 @@ const TABS = {
     headers: {
       approved: 'Approved — ready to merge',
       has_comments: 'Has comments to address',
-      comments_addressed: 'Comments addressed — awaiting re-review',
+      comments_addressed: 'Waiting for approval — comments replied to',
       not_reviewed_yet: 'Not reviewed yet',
     },
     render: renderMyPR,
@@ -1982,8 +2220,20 @@ function render(prs) {
   for (const btn of document.querySelectorAll('.btn-address')) {
     btn.addEventListener('click', onAddress);
   }
+  for (const btn of document.querySelectorAll('.btn-fix-checks')) {
+    btn.addEventListener('click', onFixChecks);
+  }
   for (const btn of document.querySelectorAll('.btn-nudge')) {
     btn.addEventListener('click', onNudge);
+  }
+  for (const btn of document.querySelectorAll('.btn-nudge-target')) {
+    btn.addEventListener('click', onNudgeTarget);
+  }
+  for (const btn of document.querySelectorAll('.btn-nudge-all')) {
+    btn.addEventListener('click', onNudgeAll);
+  }
+  for (const btn of document.querySelectorAll('.nudge-template-btn')) {
+    btn.addEventListener('click', onNudgeTemplate);
   }
   for (const btn of document.querySelectorAll('.btn-channel')) {
     btn.addEventListener('click', onChannelPing);
@@ -2000,8 +2250,8 @@ function render(prs) {
   for (const btn of document.querySelectorAll('.btn-update-branch')) {
     btn.addEventListener('click', onUpdateBranch);
   }
-  for (const btn of document.querySelectorAll('.btn-nudge-caret')) {
-    btn.addEventListener('click', onNudgeCaret);
+  for (const btn of document.querySelectorAll('.btn-nudge-teams-caret')) {
+    btn.addEventListener('click', onNudgeTeamsCaret);
   }
   for (const btn of document.querySelectorAll('.btn-channel-caret')) {
     btn.addEventListener('click', onChannelCaret);
@@ -2023,13 +2273,28 @@ function closeAllMergeMenus() {
   }
 }
 
+function closeAllNudgeMenus() {
+  for (const menu of document.querySelectorAll('.nudge-menu')) {
+    menu.hidden = true;
+  }
+  for (const btn of document.querySelectorAll('.btn-nudge')) {
+    btn.setAttribute('aria-expanded', 'false');
+  }
+}
+
 document.addEventListener('click', (ev) => {
   if (!ev.target.closest('.merge-split')) closeAllMergeMenus();
   if (!ev.target.closest('.nudge-split')) closeAllNudgeMenus();
+  if (!ev.target.closest('.nudge-teams-split')) closeAllNudgeTeamsMenus();
   if (!ev.target.closest('.channel-split')) closeAllChannelMenus();
 });
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape') { closeAllMergeMenus(); closeAllNudgeMenus(); closeAllChannelMenus(); }
+  if (ev.key === 'Escape') {
+    closeAllMergeMenus();
+    closeAllNudgeMenus();
+    closeAllNudgeTeamsMenus();
+    closeAllChannelMenus();
+  }
 });
 
 function onMergeCaret(ev) {
@@ -2044,9 +2309,9 @@ function onMergeCaret(ev) {
   }
 }
 
-function closeAllNudgeMenus() {
-  for (const menu of document.querySelectorAll('.nudge-menu')) menu.hidden = true;
-  for (const caret of document.querySelectorAll('.btn-nudge-caret')) caret.setAttribute('aria-expanded', 'false');
+function closeAllNudgeTeamsMenus() {
+  for (const menu of document.querySelectorAll('.nudge-teams-menu')) menu.hidden = true;
+  for (const caret of document.querySelectorAll('.btn-nudge-teams-caret')) caret.setAttribute('aria-expanded', 'false');
 }
 
 function closeAllChannelMenus() {
@@ -2054,12 +2319,12 @@ function closeAllChannelMenus() {
   for (const caret of document.querySelectorAll('.btn-channel-caret')) caret.setAttribute('aria-expanded', 'false');
 }
 
-function onNudgeCaret(ev) {
+function onNudgeTeamsCaret(ev) {
   ev.stopPropagation();
   const caret = ev.currentTarget;
-  const menu = caret.parentElement.querySelector('.nudge-menu');
+  const menu = caret.parentElement.querySelector('.nudge-teams-menu');
   const willOpen = menu.hidden;
-  closeAllNudgeMenus();
+  closeAllNudgeTeamsMenus();
   if (willOpen) {
     menu.hidden = false;
     caret.setAttribute('aria-expanded', 'true');
@@ -2100,7 +2365,6 @@ function renderMyPR(p) {
   const commenters = p.active_commenters && p.active_commenters.length
     ? `<div class="pr-detail">From: ${escapeHtml(p.active_commenters.join(', '))}</div>`
     : '';
-  const targets = (p.nudge_targets || []).join(',');
   const mode = p.nudge_mode || '';
   let actionBtn = '';
   if (p.status === 'approved') {
@@ -2119,12 +2383,45 @@ function renderMyPR(p) {
   } else if (p.status === 'has_comments') {
     actionBtn = `<button class="btn-address" type="button">Address</button>`;
   }
-  const nudgeTitle = mode === 'fresh'
-    ? 'DM to ask for first review'
-    : (mode === 're_review'
-        ? 'DM stale reviewers asking them to take another look'
-        : 'No one to nudge');
-  let nudgeBtn;
+  const failingCount = p.failing_count || 0;
+  const pendingCount = p.pending_count || 0;
+  const blockBanner = (failingCount > 0 || (pendingCount > 0 && p.merge_blocked))
+    ? `<div class="pr-block-banner${failingCount === 0 ? ' pending' : ''}">${escapeHtml(p.merge_block_reason || '')}</div>`
+    : '';
+  const fixBtn = failingCount > 0
+    ? `<button class="btn-fix-checks" type="button" title="Spawn Claude to investigate and fix the failing checks">Fix tests</button>`
+    : '';
+  const pickable = (CONFIG.fresh_reviewers || []);
+  const defaultTemplate = mode === 're_review' ? 're_review' : 'fresh';
+  const allTargets = (mode === 're_review' && (p.nudge_targets || []).length)
+    ? p.nudge_targets
+    : pickable;
+  const templateBtns = `
+    <div class="nudge-template" role="group" aria-label="Slack template">
+      <button type="button" class="nudge-template-btn" data-template="fresh"
+        aria-pressed="${defaultTemplate === 'fresh'}"
+        title="Friendly first-look DM: could you take a look">Fresh</button>
+      <button type="button" class="nudge-template-btn" data-template="re_review"
+        aria-pressed="${defaultTemplate === 're_review'}"
+        title="Re-review DM: I've addressed your comments">Re-review</button>
+    </div>`;
+  const targetBtns = pickable.length
+    ? pickable.map(u => `<button class="btn-nudge-target" type="button" data-user="${escapeHtml(u)}">${escapeHtml(u)}</button>`).join('')
+    : `<div class="nudge-section-label">No FRESH_REVIEWERS configured</div>`;
+  const allBtn = allTargets.length
+    ? `<button class="btn-nudge-all" type="button" data-targets="${escapeHtml(allTargets.join(','))}">DM all (${allTargets.length})</button>`
+    : '';
+  const nudgeBtn = `
+    <div class="nudge-split">
+      <button class="btn-nudge" type="button" aria-haspopup="true" aria-expanded="false" title="Pick who to DM on Slack">Nudge</button>
+      <div class="nudge-menu" hidden>
+        ${templateBtns}
+        <div class="nudge-section-label">DM individually</div>
+        ${targetBtns}
+        ${allBtn}
+      </div>
+    </div>`;
+  let teamsBtn = '';
   if (mode === 'fresh' && CONFIG.teams && CONFIG.teams.length > 0) {
     const teamItems = CONFIG.teams.map(t =>
       `<button class="menu-item btn-nudge-team" type="button"
@@ -2132,13 +2429,10 @@ function renderMyPR(p) {
          data-team-reviewers="${escapeHtml(JSON.stringify(t.reviewers))}"
          title="Ask ${escapeHtml(t.name)} reviewers on Slack">${escapeHtml(t.name)}</button>`
     ).join('');
-    nudgeBtn = `<div class="nudge-split">
-      <button class="btn-nudge" type="button" title="${escapeHtml(nudgeTitle)}">Nudge</button>
-      <button class="btn-nudge-caret" type="button" aria-label="Nudge a different team" aria-haspopup="true" aria-expanded="false">▾</button>
-      <div class="nudge-menu" hidden>${teamItems}</div>
+    teamsBtn = `<div class="nudge-teams-split">
+      <button class="btn-nudge-teams-caret" type="button" aria-label="Nudge a team" aria-haspopup="true" aria-expanded="false">Teams ▾</button>
+      <div class="nudge-teams-menu" hidden>${teamItems}</div>
     </div>`;
-  } else {
-    nudgeBtn = `<button class="btn-nudge" type="button" title="${escapeHtml(nudgeTitle)}">Nudge</button>`;
   }
   const defaultChannelLabel = (CONFIG.fresh_reviewers || []).join(' and ') || 'the team';
   let channelBtn;
@@ -2177,13 +2471,13 @@ function renderMyPR(p) {
        data-title="${escapeHtml(p.title)}"
        data-head="${escapeHtml(p.headRefName)}"
        data-method="${escapeHtml(p.defaultMergeMethod)}"
-       data-targets="${escapeHtml(targets)}"
-       data-mode="${escapeHtml(mode)}">
+       data-failing="${escapeHtml((p.failing_names || []).join(','))}">
     <div class="pr-main">
       <div class="pr-meta">${escapeHtml(p.repository)} · #${p.number}<span class="badge badge-${p.status}">${escapeHtml(p.status_label)}</span></div>
       <div class="pr-title"><a href="${escapeHtml(p.url)}" target="_blank" rel="noopener">${escapeHtml(p.title)}</a></div>
       <div class="pr-sub">updated ${relativeTime(p.updatedAt)}</div>
       ${commenters}
+      ${blockBanner}
     </div>
     <div class="pr-actions">
       <a class="btn-open" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">Open ↗</a>
@@ -2191,6 +2485,8 @@ function renderMyPR(p) {
       ${notifyBtns}
       ${channelBtn}
       ${nudgeBtn}
+      ${teamsBtn}
+      ${fixBtn}
       ${actionBtn}
     </div>
   </div>`;
@@ -2304,31 +2600,26 @@ function finishAddress(card, url, data) {
   `;
 }
 
-async function onNudge(ev) {
+async function onFixChecks(ev) {
   const btn = ev.currentTarget;
   const card = btn.closest('.pr');
   const number = parseInt(card.dataset.number, 10);
   const repo = card.dataset.repo;
   const url = card.dataset.url;
-  const title = card.dataset.title || '';
-  const mode = card.dataset.mode || '';
-  const targets = (card.dataset.targets || '').split(',').map(s => s.trim()).filter(Boolean);
+  const headRefName = card.dataset.head;
+  const failing = (card.dataset.failing || '').split(',').map(s => s.trim()).filter(Boolean);
 
-  if (!mode || !targets.length) {
-    toast('No one to nudge — everyone has approved already.');
+  if (!failing.length) {
+    toast('No failing checks recorded for this PR.');
     return;
   }
-
-  const promptLabel = mode === 'fresh'
-    ? `Ask ${targets.join(' and ')} on Slack to review this PR?`
-    : `Nudge on Slack to re-review: ${targets.join(', ')}?`;
-  if (!confirm(promptLabel)) return;
+  if (!confirm(`Spawn Claude to fix failing checks: ${failing.join(', ')}?`)) return;
 
   try {
-    const res = await fetch('/api/nudge', {
+    const res = await fetch('/api/fix-checks', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ number, repo, url, title, reviewers: targets, mode }),
+      body: JSON.stringify({ number, repo, headRefName, failingNames: failing }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -2338,8 +2629,109 @@ async function onNudge(ev) {
     toast(`Failed to start: ${e.message}`, true);
     return;
   }
-  setRunning(card, 'Nudging…');
+  setRunning(card, 'Fixing tests…');
+  streamJob(card, 'fix_checks', repo, number, url, finishFixChecks);
+}
+
+function finishFixChecks(card, url, data) {
+  const actions = card.querySelector('.pr-actions');
+  let cls = 'failed', label = '❌ Fix failed';
+  if (data.status === 'done') {
+    if (data.result === 'No action') {
+      cls = 'commented'; label = 'ℹ No action';
+    } else {
+      cls = 'approved'; label = '✅ ' + data.result;
+    }
+  }
+  actions.innerHTML = `
+    <span class="review-status ${cls}">${escapeHtml(label)}</span>
+    <a class="btn-open" href="${escapeHtml(url)}" target="_blank" rel="noopener">Open PR ↗</a>
+  `;
+}
+
+function onNudge(ev) {
+  ev.stopPropagation();
+  const btn = ev.currentTarget;
+  const menu = btn.parentElement.querySelector('.nudge-menu');
+  if (!menu) return;
+  const willOpen = menu.hidden;
+  closeAllNudgeMenus();
+  closeAllMergeMenus();
+  if (willOpen) {
+    menu.hidden = false;
+    btn.setAttribute('aria-expanded', 'true');
+  }
+}
+
+function onNudgeTemplate(ev) {
+  ev.stopPropagation();
+  const btn = ev.currentTarget;
+  const menu = btn.closest('.nudge-menu');
+  if (!menu) return;
+  for (const b of menu.querySelectorAll('.nudge-template-btn')) {
+    b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+  }
+}
+
+function selectedTemplate(card) {
+  const pressed = card.querySelector('.nudge-template-btn[aria-pressed="true"]');
+  return pressed ? pressed.dataset.template : 'fresh';
+}
+
+async function fireNudge(card, reviewers, mode, runningLabel) {
+  const number = parseInt(card.dataset.number, 10);
+  const repo = card.dataset.repo;
+  const url = card.dataset.url;
+  const title = card.dataset.title || '';
+  try {
+    const res = await fetch('/api/nudge', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ number, repo, url, title, reviewers, mode }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || ('HTTP ' + res.status));
+    }
+  } catch (e) {
+    toast(`Failed to start: ${e.message}`, true);
+    return;
+  }
+  setRunning(card, runningLabel);
   streamJob(card, 'nudge', repo, number, url, finishNudge);
+}
+
+async function onNudgeTarget(ev) {
+  ev.stopPropagation();
+  const btn = ev.currentTarget;
+  const card = btn.closest('.pr');
+  const user = btn.dataset.user;
+  if (!user) return;
+  const mode = selectedTemplate(card);
+  const label = mode === 're_review'
+    ? `Nudge ${user} on Slack to re-review?`
+    : `Ask ${user} on Slack to review this PR?`;
+  if (!confirm(label)) return;
+  closeAllNudgeMenus();
+  await fireNudge(card, [user], mode, `Nudging ${user}…`);
+}
+
+async function onNudgeAll(ev) {
+  ev.stopPropagation();
+  const btn = ev.currentTarget;
+  const card = btn.closest('.pr');
+  const targets = (btn.dataset.targets || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (!targets.length) {
+    toast('No one to nudge.');
+    return;
+  }
+  const mode = selectedTemplate(card);
+  const label = mode === 're_review'
+    ? `Nudge on Slack to re-review: ${targets.join(', ')}?`
+    : `Ask ${targets.join(' and ')} on Slack to review this PR?`;
+  if (!confirm(label)) return;
+  closeAllNudgeMenus();
+  await fireNudge(card, targets, mode, 'Nudging…');
 }
 
 function finishNudge(card, url, data) {
@@ -2801,7 +3193,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(400, "bad number")
                 return
             kind = qs.get("kind", ["review"])[0]
-            if kind not in ("review", "merge", "address", "nudge", "deploy", "update_branch", "deploy_notify"):
+            if kind not in ("review", "merge", "address", "nudge", "deploy", "update_branch", "deploy_notify", "fix_checks"):
                 self.send_error(400, "bad kind")
                 return
             if "/" not in repo or number <= 0:
@@ -2855,6 +3247,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/address":
             self._handle_address_post()
+            return
+        if parsed.path == "/api/fix-checks":
+            self._handle_fix_checks_post()
             return
         if parsed.path == "/api/nudge":
             self._handle_nudge_post()
@@ -2944,6 +3339,36 @@ class Handler(BaseHTTPRequestHandler):
             "number": number,
             "repo": repo,
             "kind": "address",
+        })
+
+    def _handle_fix_checks_post(self):
+        try:
+            data = self._read_json_body()
+            number = int(data["number"])
+            repo = str(data["repo"])
+            head_ref = str(data["headRefName"])
+            failing = data.get("failingNames") or []
+            if not isinstance(failing, list):
+                raise ValueError("failingNames must be a list")
+            failing_names = [str(n) for n in failing if n]
+            if "/" not in repo or not head_ref:
+                raise ValueError("repo must be owner/name and headRefName required")
+        except Exception as e:
+            self._send_json(400, {"error": f"bad request: {e}"})
+            return
+        job, started = get_or_create_job(repo, number, "fix_checks")
+        if started:
+            threading.Thread(
+                target=run_fix_checks,
+                args=(job, head_ref, failing_names),
+                daemon=True,
+            ).start()
+        self._send_json(202, {
+            "started": started,
+            "running": True,
+            "number": number,
+            "repo": repo,
+            "kind": "fix_checks",
         })
 
     def _handle_nudge_post(self):
