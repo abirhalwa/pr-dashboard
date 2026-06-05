@@ -1616,11 +1616,17 @@ DEPLOY_NOTIFY_PROMPT = (
 def derive_deploy_notify_result(events):
     sent = count_slack_sends(events)
     if sent == 0:
+        for ev in events:
+            if ev.get("type") != "assistant":
+                continue
+            for c in ev.get("message", {}).get("content", []):
+                if c.get("type") == "text" and "No Jira ticket key" in (c.get("text") or ""):
+                    return {"sent": 0, "label": "No Jira ticket in branch"}
         return {"sent": 0, "label": "Channel post failed"}
     return {"sent": sent, "label": "Posted in channel"}
 
 
-def run_deploy_notify(job, env, deploy_url, users):
+def run_deploy_notify(job, env, deploy_url, users, branch):
     """Spawn Claude to post the deploy-notify message in the configured channel."""
     repo = job.repo
     number = job.number
@@ -1629,10 +1635,11 @@ def run_deploy_notify(job, env, deploy_url, users):
     job.log_path = log_path
     job.append(
         f"Posting in Slack (channel {DEPLOY_NOTIFY_CHANNEL_ID}) "
-        f"tagging: {', '.join(users)}"
+        f"tagging: {', '.join(users)} (branch {branch})"
     )
     print(
-        f"[deploy-notify] starting #{number} in {repo} env={env} users={users}",
+        f"[deploy-notify] starting #{number} in {repo} env={env} "
+        f"users={users} branch={branch}",
         flush=True,
     )
 
@@ -1641,6 +1648,7 @@ def run_deploy_notify(job, env, deploy_url, users):
         users=", ".join(users),
         env=env,
         deploy_url=deploy_url,
+        branch=branch,
     )
     events = []
     try:
