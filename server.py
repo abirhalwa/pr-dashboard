@@ -3497,6 +3497,7 @@ class Handler(BaseHTTPRequestHandler):
             number = int(data["number"])
             repo = str(data["repo"])
             env = str(data["env"])
+            branch = str(data.get("branch") or "").strip()
             if "/" not in repo:
                 raise ValueError("repo must be owner/name")
             if env not in DEPLOY_ENVS:
@@ -3505,6 +3506,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("DEPLOY_NOTIFY_CHANNEL_ID not configured")
             if not DEPLOY_NOTIFY_USERS:
                 raise ValueError("DEPLOY_NOTIFY_USERS not configured")
+            if not branch:
+                raise ValueError("branch is required")
         except Exception as e:
             self._send_json(400, {"error": f"bad request: {e}"})
             return
@@ -3513,7 +3516,7 @@ class Handler(BaseHTTPRequestHandler):
         if started:
             threading.Thread(
                 target=run_deploy_notify,
-                args=(job, env, deploy_url, list(DEPLOY_NOTIFY_USERS)),
+                args=(job, env, deploy_url, list(DEPLOY_NOTIFY_USERS), branch),
                 daemon=True,
             ).start()
         self._send_json(202, {
