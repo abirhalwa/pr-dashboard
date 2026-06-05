@@ -2954,10 +2954,15 @@ async function onNotify(ev) {
   const repo = card.dataset.repo;
   const url = card.dataset.url;
   const env = btn.dataset.env;
+  const branch = card.dataset.head || '';
   const users = (CONFIG.deploy_notify_users || []).join(', ');
 
   if (!env) {
     toast('No env on this button.', true);
+    return;
+  }
+  if (!branch) {
+    toast('No branch on this card.', true);
     return;
   }
   if (!confirm(`Post a deploy notification tagging ${users} about ${env}?`)) return;
@@ -2966,7 +2971,7 @@ async function onNotify(ev) {
     const res = await fetch('/api/deploy-notify', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ number, repo, env }),
+      body: JSON.stringify({ number, repo, env, branch }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
