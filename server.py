@@ -2208,6 +2208,23 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// Extract a Jira ticket key (e.g. CSI-1812) from the branch name, falling
+// back to the PR title. Branch names are often lowercase (csi-1812-...), so
+// match case-insensitively and uppercase the result. Returns '' if none.
+function jiraKey(p) {
+  const m = String(p.headRefName ?? '').match(/[A-Za-z]+-\d+/) ||
+            String(p.title ?? '').match(/[A-Za-z]+-\d+/);
+  return m ? m[0].toUpperCase() : '';
+}
+
+// A "Jira ↗" link to the ticket, or '' when no key was found.
+function jiraLink(p) {
+  const key = jiraKey(p);
+  if (!key) return '';
+  const url = 'https://cognota.atlassian.net/browse/' + key;
+  return `<a class="btn-open" href="${escapeHtml(url)}" target="_blank" rel="noopener">Jira ↗</a>`;
+}
+
 function relativeTime(iso) {
   const t = new Date(iso).getTime();
   if (!t) return '';
@@ -2386,7 +2403,7 @@ function renderIncomingPR(p) {
       ${detail}
     </div>
     <div class="pr-actions">
-      <a class="btn-open" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">Open ↗</a>
+      ${jiraLink(p)}
       <button class="btn-review" type="button">Review</button>
     </div>
   </div>`;
@@ -2511,7 +2528,7 @@ function renderMyPR(p) {
       ${blockBanner}
     </div>
     <div class="pr-actions">
-      <a class="btn-open" href="${escapeHtml(p.url)}" target="_blank" rel="noopener">Open ↗</a>
+      ${jiraLink(p)}
       ${deployBtns}
       ${notifyBtns}
       ${channelBtn}
