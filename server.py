@@ -2499,12 +2499,12 @@ function renderMyPR(p) {
          title="Post in ${escapeHtml(t.name)} channel">${escapeHtml(t.name)}</button>`
     ).join('');
     channelBtn = `<div class="channel-split">
-      <button class="btn-channel" type="button" title="Post in team channel tagging ${escapeHtml(defaultChannelLabel)}">#Channel</button>
+      <button class="btn-channel" type="button" title="Post in team channel tagging ${escapeHtml(defaultChannelLabel)}">#dev channel</button>
       <button class="btn-channel-caret" type="button" aria-label="Post in a different team's channel" aria-haspopup="true" aria-expanded="false">▾</button>
       <div class="channel-menu" hidden>${teamItems}</div>
     </div>`;
   } else {
-    channelBtn = `<button class="btn-channel" type="button" title="Post in team channel tagging ${escapeHtml(defaultChannelLabel)}">#Channel</button>`;
+    channelBtn = `<button class="btn-channel" type="button" title="Post in team channel tagging ${escapeHtml(defaultChannelLabel)}">#dev channel</button>`;
   }
   const deployBtns = (CONFIG.deploy_envs || []).map(env =>
     `<button class="btn-deploy" type="button" data-env="${escapeHtml(env)}" title="Run the ${escapeHtml(env)} workflow against ${escapeHtml(p.headRefName)}">🚀 ${escapeHtml(env)}</button>`
